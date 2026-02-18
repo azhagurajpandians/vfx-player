@@ -1,0 +1,7 @@
+PyQt6>=6.7.0
+opencv-python>=4.9.0.80
+# OpenEXR Python wheels: the PyPI package providing bindings is usually named 'openexr' or 'OpenEXR'.
+# Imath wheels with semantic versions 3.x are NOT published (only 0.0.1 / 0.0.2 exist), so requiring Imath>=3.1.9 breaks install.
+# We rely only on OpenEXR; Imath comes bundled inside that wheel where available. If unavailable, enable OpenCV EXR fallback via env var.
+OpenEXR>=1.3.9
+numpy>=1.26.0
