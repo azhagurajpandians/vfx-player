@@ -134,7 +134,8 @@ def main():
     try:
         parser = argparse.ArgumentParser(add_help=True)
         parser.add_argument("--cache", type=int, default=None, help="LRU cache capacity (frames). Default 500; or set VFXPLAYER_CACHE_CAPACITY env var.")
-        args, _ = parser.parse_known_args()
+        # Parse arguments, keeping unknown args as potential filenames
+        args, remaining = parser.parse_known_args()
 
         # Ensure a QApplication exists before any QWidget
         qt_app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
@@ -143,6 +144,15 @@ def main():
         core = PlayerCore(cache_capacity=cap)
         window = MainWindow(core)
         window.show()
+        
+        # Load file if passed as argument (e.g. double-click in Explorer)
+        if remaining:
+            # Open the first file argument
+            file_path = remaining[0]
+            if os.path.exists(file_path):
+                # Use QTimer to allow UI to initialize first
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(100, lambda: window.load_media(file_path))
         sys.exit(qt_app.exec())
     except Exception:
         # Catch exceptions during startup too

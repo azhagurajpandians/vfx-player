@@ -932,6 +932,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._status_base = f"Loaded: {path}"
         self._update_status(self._status_base)
         self._update_timer_interval()
+        
+        # Auto-play on load as requested
+        self.play()
 
 
     def _show_frame(self, index: int):
