@@ -1337,15 +1337,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # --- Gamma Shortcuts ([ / ]) ---
         elif key == QtCore.Qt.Key.Key_BracketLeft:
-            self.gamma_slider.setValue(self.gamma_slider.value() - 10) # -0.1
+            self.gam_slider.setValue(self.gam_slider.value() - 10) # -0.1
         elif key == QtCore.Qt.Key.Key_BracketRight:
-            self.gamma_slider.setValue(self.gamma_slider.value() + 10) # +0.1
+            self.gam_slider.setValue(self.gam_slider.value() + 10) # +0.1
             
         # --- Exposure Shortcuts (- / =) ---
         elif key == QtCore.Qt.Key.Key_Minus and not (event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier):
-            self.exposure_slider.setValue(self.exposure_slider.value() - 25) # -0.25
+            self.exp_slider.setValue(self.exp_slider.value() - 25) # -0.25
         elif key in (QtCore.Qt.Key.Key_Equal, QtCore.Qt.Key.Key_Plus) and not (event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier):
-            self.exposure_slider.setValue(self.exposure_slider.value() + 25) # +0.25
+            self.exp_slider.setValue(self.exp_slider.value() + 25) # +0.25
 
         # --- Zoom Shortcuts (Ctrl + / -) ---
         elif key in (QtCore.Qt.Key.Key_Plus, QtCore.Qt.Key.Key_Equal) and (event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier):
