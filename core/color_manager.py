@@ -7,10 +7,8 @@ except ImportError:
 
 class ColorManager:
     """
-    Color management. OCIO colorconvert runs in BACKGROUND threads (via FrameLoader).
-    This class only does fast exposure/gamma on the main thread.
     """
-    def __init__(self):
+    def __init__(self, config_path: str = None):
         self.ocio_enabled = True
         self.config = None
         self.processor = None
@@ -20,12 +18,13 @@ class ColorManager:
         self.input_choices = []
         self.output_choices = []
         self.view_choices = []
-        self.config_path = None
+        # Prioritize passed path, then env
+        self.config_path = config_path
         
         self._init_ocio()
 
     def _init_ocio(self):
-        cfg_path = os.environ.get('OCIO_CONFIG_PATH') or os.environ.get('OCIO')
+        cfg_path = self.config_path or os.environ.get('OCIO_CONFIG_PATH') or os.environ.get('OCIO')
         if not cfg_path or not os.path.isfile(cfg_path):
             here = os.path.dirname(os.path.dirname(__file__))
             bundled = os.path.join(here, 'configs', 'ocio', 'config.ocio')

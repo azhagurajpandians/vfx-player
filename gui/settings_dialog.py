@@ -29,7 +29,29 @@ class SettingsDialog(QtWidgets.QDialog):
         self.cache_spin.setValue(self.prefs.get('cache_size', 500))
         self.cache_spin.setSuffix(" frames")
         cg_layout.addRow("Capacity:", self.cache_spin)
+        cg_layout.addRow("Capacity:", self.cache_spin)
         self.gen_layout.addWidget(cache_group)
+        
+        # OCIO Config
+        ocio_group = QtWidgets.QGroupBox("OpenColorIO Configuration")
+        ocio_layout = QtWidgets.QHBoxLayout(ocio_group)
+        
+        self.ocio_path_edit = QtWidgets.QLineEdit()
+        # Load from prefs or env
+        current_ocio = self.prefs.get('ocio_config', "")
+        if not current_ocio and 'OCIO' in QtCore.QProcessEnvironment.systemEnvironment().keys():
+             import os
+             current_ocio = os.environ.get('OCIO', "")
+        self.ocio_path_edit.setText(current_ocio)
+        self.ocio_path_edit.setPlaceholderText("Path to config.ocio (leave empty to use env)")
+        
+        self.ocio_browse_btn = QtWidgets.QPushButton("Browse...")
+        self.ocio_browse_btn.clicked.connect(self._browse_ocio)
+        
+        ocio_layout.addWidget(self.ocio_path_edit)
+        ocio_layout.addWidget(self.ocio_browse_btn)
+        
+        self.gen_layout.addWidget(ocio_group)
         self.gen_layout.addStretch()
         
         # --- Defaults Tab ---
@@ -88,6 +110,13 @@ class SettingsDialog(QtWidgets.QDialog):
         btns.rejected.connect(self.reject)
         self.layout.addWidget(btns)
         
+    def _browse_ocio(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Select OCIO Config", "", "OCIO Files (*.ocio);;All Files (*.*)"
+        )
+        if path:
+            self.ocio_path_edit.setText(path)
+
     def _set_combo(self, combo, value):
         if value and value in self.cm.input_choices + self.cm.output_choices:
             combo.setCurrentText(value)
@@ -97,6 +126,7 @@ class SettingsDialog(QtWidgets.QDialog):
     def get_prefs(self):
         # Update prefs dict from UI
         self.prefs['cache_size'] = self.cache_spin.value()
+        self.prefs['ocio_config'] = self.ocio_path_edit.text().strip()
         
         if 'defaults' not in self.prefs:
             self.prefs['defaults'] = {}

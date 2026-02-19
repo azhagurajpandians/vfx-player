@@ -136,13 +136,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wipe_mode = False
         self._init_wipe_ui()
 
+        # Load prefs first to get OCIO config path
+        self.prefs = {}
+        self._load_prefs()
+        ocio_config = self.prefs.get('ocio_config')
+
         # Initialize OCIO
         try:
-            self.color_manager = ColorManager()
+            self.color_manager = ColorManager(config_path=ocio_config)
         except Exception:
             # Minimal fallback to avoid crash
             class DummyCM:
-                def __init__(self):
+                def __init__(self, config_path=None):
                     self.config = None
                     self.ocio_enabled = False
                     self.input_cs = None
