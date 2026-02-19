@@ -1334,10 +1334,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self.seek(0)
         elif key == QtCore.Qt.Key.Key_End:
             self.seek(self.core.frame_count() - 1)
-        elif key in (QtCore.Qt.Key.Key_Plus, QtCore.Qt.Key.Key_Equal):
+
+        # --- Gamma Shortcuts ([ / ]) ---
+        elif key == QtCore.Qt.Key.Key_BracketLeft:
+            self.gamma_slider.setValue(self.gamma_slider.value() - 10) # -0.1
+        elif key == QtCore.Qt.Key.Key_BracketRight:
+            self.gamma_slider.setValue(self.gamma_slider.value() + 10) # +0.1
+            
+        # --- Exposure Shortcuts (- / =) ---
+        elif key == QtCore.Qt.Key.Key_Minus and not (event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier):
+            self.exposure_slider.setValue(self.exposure_slider.value() - 25) # -0.25
+        elif key in (QtCore.Qt.Key.Key_Equal, QtCore.Qt.Key.Key_Plus) and not (event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier):
+            self.exposure_slider.setValue(self.exposure_slider.value() + 25) # +0.25
+
+        # --- Zoom Shortcuts (Ctrl + / -) ---
+        elif key in (QtCore.Qt.Key.Key_Plus, QtCore.Qt.Key.Key_Equal) and (event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier):
             self.viewport.set_zoom(self.viewport._zoom * 1.1)
             self._update_zoom_label()
-        elif key in (QtCore.Qt.Key.Key_Minus, QtCore.Qt.Key.Key_Underscore):
+        elif key in (QtCore.Qt.Key.Key_Minus, QtCore.Qt.Key.Key_Underscore) and (event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier):
             self.viewport.set_zoom(self.viewport._zoom / 1.1)
             self._update_zoom_label()
         elif key == QtCore.Qt.Key.Key_F:
