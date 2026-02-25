@@ -346,7 +346,14 @@ class FrameLoader:
         return disp
 
     def _video_worker_loop(self):
-        """Video worker: tries cv2 first, falls back to FFmpeg for ProRes/DNxHR."""
+        """Video worker: sequential read-ahead ring buffer.
+        
+        Instead of seeking per-frame (extremely slow with cv2), this reads
+        frames sequentially forward from the current playback position.
+        When a seek is needed (scrub/reverse), it repositions once and
+        resumes sequential reading. This matches how RV/DJV achieve
+        real-time playback.
+        """
         import cv2
 
         _cap = None           # cv2.VideoCapture
@@ -355,6 +362,8 @@ class FrameLoader:
         _use_ffmpeg = False
         _local_session = self.session_id
         _media_fps = 24.0
+        _next_seq_frame = -1  # Next frame to read sequentially
+        _inv255 = np.float32(1.0 / 255.0)
 
         while not self.stopping:
             if self.session_id != _local_session:
@@ -368,10 +377,11 @@ class FrameLoader:
                     _ffmpeg_reader = None
                 _cap_path = None
                 _use_ffmpeg = False
+                _next_seq_frame = -1
                 _local_session = self.session_id
 
             try:
-                item = self._vid_queue.get(timeout=0.05)
+                item = self._vid_queue.get(timeout=0.02)
                 priority, _, index, path = item
 
                 with self.cache_lock:
@@ -390,6 +400,7 @@ class FrameLoader:
                         _ffmpeg_reader = None
                     _use_ffmpeg = False
                     _cap_path = path
+                    _next_seq_frame = -1
 
                     # Try cv2 first
                     _cap = cv2.VideoCapture(path)
@@ -397,7 +408,7 @@ class FrameLoader:
                         _media_fps = _cap.get(cv2.CAP_PROP_FPS) or 24.0
                         _use_ffmpeg = False
                     else:
-                        # cv2 failed — fall back to FFmpeg (handles ProRes, DNxHR, etc.)
+                        # cv2 failed — fall back to FFmpeg
                         _cap.release()
                         _cap = None
                         info = probe_video(path)
@@ -411,24 +422,45 @@ class FrameLoader:
                             _ffmpeg_reader = None
                             continue
 
-                # Read frame
+                # --- Sequential read-ahead strategy ---
+                # Only seek if the requested frame is NOT the next sequential frame
+                need_seek = (_next_seq_frame != index)
+
                 frame = None
                 if _use_ffmpeg and _ffmpeg_reader:
                     raw = _ffmpeg_reader.read_frame(index, _media_fps)
                     if raw is not None:
-                        frame = raw.astype(np.float32) * (1.0 / 255.0)
+                        frame = raw.astype(np.float32) * _inv255
+                    _next_seq_frame = index + 1
                 elif _cap is not None and _cap.isOpened():
-                    current_pos = int(_cap.get(cv2.CAP_PROP_POS_FRAMES))
-                    if current_pos != index:
+                    if need_seek:
                         _cap.set(cv2.CAP_PROP_POS_FRAMES, index)
                     ret, bgr = _cap.read()
                     if ret:
-                        frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) * (1.0 / 255.0)
+                        frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) * _inv255
+                    _next_seq_frame = index + 1
 
                 if frame is not None:
                     with self.cache_lock:
                         if index not in self.cache_ref:
                             self.cache_ref[index] = frame
+
+                    # --- Read-ahead burst: fill cache with next N frames sequentially ---
+                    if not _use_ffmpeg and _cap is not None and _cap.isOpened():
+                        for ahead in range(_next_seq_frame, _next_seq_frame + 8):
+                            if self.session_id != _local_session or self.stopping:
+                                break
+                            with self.cache_lock:
+                                if ahead in self.cache_ref:
+                                    continue
+                            ret, bgr = _cap.read()
+                            if not ret:
+                                break
+                            fr = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) * _inv255
+                            with self.cache_lock:
+                                if ahead not in self.cache_ref:
+                                    self.cache_ref[ahead] = fr
+                            _next_seq_frame = ahead + 1
 
             except queue.Empty:
                 continue
@@ -630,16 +662,18 @@ class PlayerCore:
             return
         cnt = self.media.frame_count
         fps = self.clock.speed()
-        future_frame = current_index + int(fps * 0.6 * direction)
+        future_frame = current_index + int(fps * 0.8 * direction)
 
-        zone_size = 5
+        # Large prefetch zone: 24 frames (1 second at 24fps)
+        zone_size = 24
         for f in range(future_frame - zone_size, future_frame + zone_size):
             if 0 <= f < cnt:
                 with self.cache_lock:
                     if f not in self.cache:
                         self.loader.request(self._get_path(f), f, priority=1)
 
-        if abs(future_frame - current_index) < 100:
+        # Fill gap between current and future prediction
+        if abs(future_frame - current_index) < 200:
              r = range(current_index + 1, future_frame) if direction > 0 else range(current_index - 1, future_frame, -1)
              for f in r:
                 if 0 <= f < cnt:
@@ -647,6 +681,17 @@ class PlayerCore:
                         if f not in self.cache:
                             self.loader.request(self._get_path(f), f, priority=2)
         self._prune_cache()
+
+    def burst_prefetch(self, start_index: int, count: int = 48):
+        """Aggressively prefetch `count` frames forward from start_index.
+        Called on play() start to fill the cache pipeline."""
+        if not self.media:
+            return
+        cnt = self.media.frame_count
+        for f in range(start_index, min(start_index + count, cnt)):
+            with self.cache_lock:
+                if f not in self.cache:
+                    self.loader.request(self._get_path(f), f, priority=0)
 
     def _prune_cache(self):
         with self.cache_lock:

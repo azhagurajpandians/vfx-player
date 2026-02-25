@@ -1,0 +1,18 @@
+Traceback (most recent call last):
+  File "D:\exrtojpg\VFXPlayer\scripts\exr_worker.py", line 16, in main
+    arr = iio.imread(in_path)
+  File "D:\exrtojpg\VFXPlayer\.venv_build\lib\site-packages\imageio\v3.py", line 53, in imread
+    with imopen(uri, "r", **plugin_kwargs) as img_file:
+  File "D:\exrtojpg\VFXPlayer\.venv_build\lib\site-packages\imageio\core\imopen.py", line 196, in imopen
+    plugin_instance = candidate_plugin(request, **kwargs)
+  File "D:\exrtojpg\VFXPlayer\.venv_build\lib\site-packages\imageio\plugins\opencv.py", line 57, in __init__
+    if mode == IOMode.read and not cv2.haveImageReader(self.file_handle):
+cv2.error: OpenCV(4.12.0) D:\a\opencv-python\opencv-python\opencv\modules\imgcodecs\src\grfmt_exr.cpp:103: error: (-213:The function/feature is not implemented) imgcodecs: OpenEXR codec is disabled. You can enable it via 'OPENCV_IO_ENABLE_OPENEXR' option. Refer for details and cautions here: https://github.com/opencv/opencv/issues/21326 in function 'cv::initOpenEXR'
+
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "D:\exrtojpg\VFXPlayer\scripts\exr_worker.py", line 20, in main
+    import OpenEXR, Imath
+ModuleNotFoundError: No module named 'OpenEXR'

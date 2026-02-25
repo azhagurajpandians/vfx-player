@@ -51,35 +51,17 @@ base_path = setup_ocio_runtime()
 
 print(f"DEBUG: Base path for DLL search: {base_path}")
 
-# Helper function to log to file
-def log_debug(msg):
-    try:
-        with open("debug_log.txt", "a") as f:
-            f.write(msg + "\n")
-    except:
-        pass
-
-log_debug("DEBUG: Starting VFX Player...")
-# input("Press Enter to continue...") # Commented out input for build automation, or enable for debug
-
 # Pre-load OCIO to avoid DLL conflicts with PyQt6
 try:
-    log_debug("DEBUG: Importing OpenImageIO...")
     import OpenImageIO as oiio
-    log_debug(f"DEBUG: OpenImageIO imported successfully: {oiio.__file__}")
 except ImportError as e:
-    log_debug(f"ERROR: Could not import OpenImageIO: {e}")
     oiio = None
 
 try:
-    log_debug("DEBUG: Importing PyOpenColorIO...")
     import PyOpenColorIO as OCIO
-    log_debug(f"DEBUG: PyOpenColorIO imported successfully: {OCIO.__file__}")
 except ImportError as e:
-    log_debug(f"ERROR: Could not import PyOpenColorIO: {e}")
     OCIO = None
 except Exception as e:
-    log_debug(f"ERROR: Exception during PyOpenColorIO import: {e}")
     pass
 
 import argparse

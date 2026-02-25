@@ -97,25 +97,18 @@ class ColorManager:
         except Exception:
             self.processor = None
 
-    def process(self, arr: np.ndarray, exposure: float = 0.0, gamma: float = 1.0) -> np.ndarray:
+    def process(self, arr: np.ndarray, exposure: float = 0.0, gamma: float = 1.0, channel: str = 'RGB') -> np.ndarray:
         """
-        Main-thread processing. ONLY applies exposure and gamma.
+        Main-thread processing. ONLY applies exposure and gamma, and channel selection.
         OCIO colorconvert is already applied by the background workers.
         
         Input: float32 from cache (already OCIO processed)
         Output: float32 [0, 1] ready for display
+        
+        OPTIMIZED: Zero-copy fast path when no adjustments needed.
         """
         if arr is None:
             return None
-
-        no_exposure = (exposure == 0.0)
-        no_gamma = (gamma == 1.0 or abs(gamma - 1.0) < 1e-6)
-        
-        # Fast path: nothing to do
-        if no_exposure and no_gamma:
-            if arr.dtype == np.float32:
-                return np.clip(arr, 0.0, 1.0)
-            return np.clip(arr.astype(np.float32), 0.0, 1.0)
 
         # Normalize if needed
         if arr.dtype == np.uint8:
@@ -125,15 +118,54 @@ class ColorManager:
         else:
             disp = arr
 
-        # Exposure
+        no_exposure = (exposure == 0.0)
+        no_gamma = (gamma == 1.0 or abs(gamma - 1.0) < 1e-6)
+
+        # === ZERO-COPY FAST PATH ===
+        # If no adjustments and already RGB float32, return directly.
+        # VisPy's shader handles clipping, so we skip np.clip entirely.
+        if no_exposure and no_gamma and channel == 'RGB':
+            if disp.shape[2] == 3:
+                return disp  # Zero-copy: no allocation, no computation
+            elif disp.shape[2] >= 4:
+                return disp[:,:,:3]
+            elif disp.shape[2] == 1:
+                return np.broadcast_to(disp, (*disp.shape[:2], 3)).copy()
+
+        # Channel Isolation (creates a new array)
+        if channel != 'RGB':
+            if channel == 'R' and disp.shape[2] >= 1:
+                disp = np.stack([disp[:,:,0]]*3, axis=-1)
+            elif channel == 'G' and disp.shape[2] >= 2:
+                disp = np.stack([disp[:,:,1]]*3, axis=-1)
+            elif channel == 'B' and disp.shape[2] >= 3:
+                disp = np.stack([disp[:,:,2]]*3, axis=-1)
+            elif channel == 'A':
+                if disp.shape[2] >= 4:
+                    disp = np.stack([disp[:,:,3]]*3, axis=-1)
+                else:
+                    return np.ones((disp.shape[0], disp.shape[1], 3), dtype=np.float32)
+        elif disp.shape[2] >= 4:
+            disp = disp[:,:,:3].copy()  # Need copy since we'll modify in-place
+        elif disp.shape[2] == 1:
+            disp = np.stack([disp[:,:,0]]*3, axis=-1)
+
+        # If adjustments needed, work on a copy to avoid mutating the cache
+        if not no_exposure or not no_gamma:
+            if not disp.flags['OWNDATA']:
+                disp = disp.copy()
+
+        # Exposure (in-place)
         if not no_exposure:
-            disp = disp * pow(2.0, exposure)
+            np.multiply(disp, pow(2.0, exposure), out=disp)
 
-        # Gamma
+        # Gamma (in-place where possible)
         if not no_gamma:
-            disp = np.clip(disp, 0.0, None) ** (1.0 / gamma)
+            np.clip(disp, 0.0, None, out=disp)
+            np.power(disp, 1.0 / gamma, out=disp)
 
-        return np.clip(disp, 0.0, 1.0)
+        np.clip(disp, 0.0, 1.0, out=disp)
+        return disp
 
     def get_colorspace_from_label(self, label: str) -> str:
         if not label or '(' not in label or ')' not in label:

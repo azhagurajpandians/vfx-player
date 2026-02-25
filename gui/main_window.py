@@ -16,22 +16,64 @@ class PlayheadSlider(QtWidgets.QSlider):
     clearer playhead indicator without custom overlay widgets."""
     def __init__(self, *args, **kwargs):
         super().__init__(QtCore.Qt.Orientation.Horizontal, *args, **kwargs)
-        self.setTickPosition(QtWidgets.QSlider.TickPosition.TicksBelow)
+        self.setTickPosition(QtWidgets.QSlider.TickPosition.NoTicks)
         self.setTickInterval(1)
         self.setSingleStep(1)
+        self.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid #333;
+                height: 4px;
+                background: #111;
+                margin: 0px 0;
+            }
+            QSlider::sub-page:horizontal {
+                background: #4a90e2;
+            }
+            QSlider::handle:horizontal {
+                background: #fff;
+                border: 1px solid #333;
+                width: 10px;
+                margin: -4px 0;
+                border-radius: 5px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #4a90e2;
+            }
+        """)
 
     def paintEvent(self, event: QtGui.QPaintEvent):  # type: ignore[override]
         super().paintEvent(event)
         if self.maximum() <= self.minimum():
             return
-        ratio = (self.value() - self.minimum()) / max(1, (self.maximum() - self.minimum()))
-        x = int(ratio * (self.width() - 1))
+            
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, False)
-        pen = QtGui.QPen(QtGui.QColor(255, 60, 60))
-        pen.setWidth(2)
-        p.setPen(pen)
-        p.drawLine(x, 0, x, self.height())
+        
+        # Calculate track boundaries (handle is 10px wide, so 5px margin on each side)
+        margin = 5
+        track_w = self.width() - (margin * 2)
+        
+        # Draw custom blue tick marks
+        interval = self.tickInterval()
+        if interval <= 0:
+            interval = self.pageStep()
+        if interval > 0:
+            tick_pen = QtGui.QPen(QtGui.QColor("#4a90e2"))
+            tick_pen.setWidth(1)
+            p.setPen(tick_pen)
+            
+            for val in range(self.minimum(), self.maximum() + 1, interval):
+                ratio = (val - self.minimum()) / (self.maximum() - self.minimum())
+                tx = margin + int(ratio * track_w)
+                p.drawLine(tx, self.height() - 4, tx, self.height())
+
+        # Draw the playhead line
+        ratio = (self.value() - self.minimum()) / max(1, (self.maximum() - self.minimum()))
+        px = margin + int(ratio * track_w)
+        playhead_pen = QtGui.QPen(QtGui.QColor("#4a90e2"))
+        playhead_pen.setWidth(2)
+        p.setPen(playhead_pen)
+        p.drawLine(px, 0, px, self.height())
         p.end()
 
 
@@ -60,6 +102,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1280, 800)
         self.setMinimumSize(800, 500)
 
+        # Set Window Icon
+        icon_path = os.path.join(_APP_ROOT, "logo.png")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QtGui.QIcon(icon_path))
+        elif os.path.exists(os.path.join(_APP_ROOT, "logo.ico")):
+            self.setWindowIcon(QtGui.QIcon(os.path.join(_APP_ROOT, "logo.ico")))
+
         # Apply "Dark Pro" Theme
         self.setStyleSheet("""
             QMainWindow, QWidget { background-color: #121212; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; }
@@ -87,6 +136,10 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self.viewport = VispyViewport(main_window=self, role='primary')
             self.viewport_b = VispyViewport(main_window=self, role='secondary')
+            self.viewport.pixel_probe_hover.connect(self._on_pixel_probe)
+            self.viewport_b.pixel_probe_hover.connect(self._on_pixel_probe)
+            self.viewport.stroke_finished.connect(self._on_stroke_finished)
+            self.viewport_b.stroke_finished.connect(self._on_stroke_finished)
             self.viewport_b.hide()
             # Connect viewport click interactions
             self.viewport.single_clicked.connect(self._toggle_play_pause)
@@ -105,8 +158,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.side_by_side = False
         self.fullscreen = False
         self.compare_offset = 0
-
-        # Main Layout (Stacking for HUD)
+        self.annotations = {} # mapping frame index -> list of stroke dicts
         self.central_widget = QtWidgets.QWidget()
         self.setCentralWidget(self.central_widget)
         
@@ -127,8 +179,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hud_container = QtWidgets.QFrame()
         self.hud_container.setFixedHeight(60)
         self.hud_container.setStyleSheet("background-color: #181818; border-top: 1px solid #2a2a2a;")
-        self.hud_layout = QtWidgets.QHBoxLayout(self.hud_container)
-        self.hud_layout.setContentsMargins(16, 0, 16, 0)
+        self.hud_layout = QtWidgets.QVBoxLayout(self.hud_container)
+        self.hud_layout.setContentsMargins(0, 0, 0, 0)
+        self.hud_layout.setSpacing(0)
         self.main_layout.addWidget(self.hud_container)
 
         # Init wipe UI (hidden by default)
@@ -159,6 +212,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Color controls state
         self.exposure = 0.0
         self.gamma = 1.0
+        self.channel_mode = 'RGB'
         self.prefs = {}
         self._load_prefs()
         # Apply prefs to manager
@@ -211,186 +265,312 @@ class MainWindow(QtWidgets.QMainWindow):
         self._target_frame_index = -1
 
     def _build_hud(self):
-        """Construct the bottom Heads-Up Display for controls."""
-        l = self.hud_layout
+        """Construct the bottom Heads-Up Display for controls (Nuke-style)."""
+        # Main HUD layout: Vertical (Slider Top, Controls Bottom)
+        self.hud_layout.setContentsMargins(0, 0, 0, 0)
+        self.hud_layout.setSpacing(0)
         
+        # We need to rebuild the hud_container's layout to be Vertical if it was horizontal
+        # But self.hud_layout is already defined as QHBoxLayout in __init__?
+        # Let's check __init__. 
+        # In __init__: self.hud_layout = QtWidgets.QHBoxLayout(self.hud_container)
+        # We need to change this to QVBoxLayout or add a container.
+        # Since we can't easily change the layout type of an existing widget without re-creating it,
+        # let's reparent the current layout or just work with what we have? 
+        # Actually, it's better to clear the existing layout item in __init__ or just modify it here if possible.
+        # But `replace_file_content` on `_build_hud` won't change `__init__`.
+        # So I will treat `self.hud_layout` as the *container* interaction. 
+        # Wait, if `self.hud_layout` is QHBoxLayout, I can't put a vertical structure effectively unless I add a wrapper.
+        
+        # Let's clean up `self.hud_container` layout.
+        # We'll create a new strict layout inside this method.
+        
+        # Remove old layout if it exists (standard PyQt trick)
+        if self.hud_container.layout():
+            QtWidgets.QWidget().setLayout(self.hud_container.layout()) # Re-parent to dummy to delete?
+            # Or just delete the implementation? 
+            # Safest is to just make a new widget structure inside the existing generic container if I can't change __init__.
+            # But I CAN change __init__ in a separate tool call. 
+            # For now, let's assume I can't change __init__ easily in this single block.
+            # I will assume I can just delete the old layout or ignore it? No.
+            pass
+
+        # Use a local widget to hold everything if needed, but let's try to update __init__ too if we can.
+        # Actually, let's just use the existing `self.hud_container`.
+    
+
+
+    def _build_hud(self):
+        """Construct the bottom Heads-Up Display for controls (Nuke-style)."""
+        # Re-orient to Vertical: Slider (Row 1) | Controls (Row 2)
+        
+        # --- ROW 1: Timeline Slider ---
+        slider_container = QtWidgets.QWidget()
+        slider_container.setFixedHeight(24)
+        slider_container.setStyleSheet("background-color: #222; border-bottom: 1px solid #333;")
+        slider_layout = QtWidgets.QHBoxLayout(slider_container)
+        slider_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.frame_slider = PlayheadSlider() # User custom class
+        self.frame_slider.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.frame_slider.valueChanged.connect(self._show_frame)
+        
+        slider_layout.addWidget(self.frame_slider)
+        self.hud_layout.addWidget(slider_container)
+        
+        # --- ROW 2: Transport Controls ---
+        controls_container = QtWidgets.QWidget()
+        controls_container.setFixedHeight(36)
+        controls_container.setStyleSheet("background-color: #1a1a1a;")
+        controls_layout = QtWidgets.QHBoxLayout(controls_container)
+        controls_layout.setContentsMargins(10, 2, 10, 2)
+        controls_layout.setSpacing(8)
+        
+        # Styles
         btn_style = """
             QPushButton {
-                background-color: #333;
-                color: #ddd;
-                border-radius: 4px;
-                padding: 6px 12px;
-                font-size: 14px;
+                background-color: transparent; 
+                color: #ccc; 
+                border: none; 
+                font-size: 14px; 
+                padding: 4px;
             }
-            QPushButton:hover { background-color: #444; }
-            QPushButton:pressed { background-color: #555; }
-            QPushButton:checked { background-color: #4a90e2; color: white; }
+            QPushButton:hover { color: white; background-color: #333; border-radius: 3px; }
+            QPushButton:pressed { color: #aaa; }
+        """
+        input_style = """
+            QLineEdit {
+                background-color: #111; 
+                color: #ddd; 
+                border: 1px solid #333; 
+                border-radius: 3px; 
+                padding: 2px;
+                selection-background-color: #4a90e2;
+                font-family: Consolas, monospace;
+            }
+            QLineEdit:focus { border-color: #555; }
         """
         
-        # 1. Playback Controls
-        self.prev_btn = QtWidgets.QPushButton("⏮")
-        self.prev_btn.setFixedSize(40, 40)
-        self.prev_btn.clicked.connect(lambda: self.seek(self.current_index - 1))
+        # 1. Frame Range (Left) - In/Out
+        self.range_start_edit = QtWidgets.QLineEdit("0")
+        self.range_start_edit.setFixedWidth(40)
+        self.range_start_edit.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        self.range_start_edit.setStyleSheet(input_style)
+        self.range_start_edit.editingFinished.connect(self._update_range)
         
-        self.play_btn = QtWidgets.QPushButton("▶")
-        self.play_btn.setFixedSize(50, 40)
-        self.play_btn.clicked.connect(self.play)
+        self.range_end_edit = QtWidgets.QLineEdit("100")
+        self.range_end_edit.setFixedWidth(40)
+        self.range_end_edit.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        self.range_end_edit.setStyleSheet(input_style)
+        self.range_end_edit.editingFinished.connect(self._update_range)
         
-        self.pause_btn = QtWidgets.QPushButton("⏸")
-        self.pause_btn.setFixedSize(50, 40)
-        self.pause_btn.clicked.connect(self.pause)
-        self.pause_btn.hide()
+        controls_layout.addWidget(QtWidgets.QLabel("In:"))
+        controls_layout.addWidget(self.range_start_edit)
+        controls_layout.addWidget(QtWidgets.QLabel("Out:"))
+        controls_layout.addWidget(self.range_end_edit)
         
-        self.next_btn = QtWidgets.QPushButton("⏭")
-        self.next_btn.setFixedSize(40, 40)
-        self.next_btn.clicked.connect(lambda: self.seek(self.current_index + 1))
+        controls_layout.addStretch(1) # Spacer
         
-        l.addWidget(self.prev_btn)
-        self.play_btn.setCheckable(True)
-        self.play_btn.setStyleSheet(btn_style)
-        self.play_btn.clicked.connect(lambda: self.pause() if self.play_btn.isChecked() else self.play())
-        self.hud_layout.addWidget(self.play_btn)
-
-        # 2. Timeline Slider
-        self.frame_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.frame_slider.setMinimumHeight(40)
-        self.frame_slider.setMinimumWidth(300) # Ensure it's not squashed
-        self.frame_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
+        # 2. Transport Buttons (Center)
+        # First Frame
+        self.btn_first = QtWidgets.QPushButton("|<")
+        self.btn_first.setFixedSize(30, 28)
+        self.btn_first.setStyleSheet(btn_style)
+        self.btn_first.setToolTip("Go to First Frame")
+        self.btn_first.clicked.connect(self._go_to_start)
+        controls_layout.addWidget(self.btn_first)
+        
+        # Prev Frame
+        self.btn_prev = QtWidgets.QPushButton("<")
+        self.btn_prev.setFixedSize(30, 28)
+        self.btn_prev.setStyleSheet(btn_style)
+        self.btn_prev.setToolTip("Previous Frame")
+        self.btn_prev.clicked.connect(lambda: self.seek(self.current_index - 1))
+        controls_layout.addWidget(self.btn_prev)
+        
+        # Play/Pause
+        self.btn_play = QtWidgets.QPushButton("▶") # Toggles icon
+        self.btn_play.setFixedSize(30, 28)
+        self.btn_play.setStyleSheet(btn_style)
+        self.btn_play.setCheckable(True)
+        self.btn_play.setToolTip("Play/Pause")
+        self.btn_play.clicked.connect(self._toggle_play_button)
+        controls_layout.addWidget(self.btn_play)
+        
+        # Next Frame
+        self.btn_next = QtWidgets.QPushButton(">")
+        self.btn_next.setFixedSize(30, 28)
+        self.btn_next.setStyleSheet(btn_style)
+        self.btn_next.setToolTip("Next Frame")
+        self.btn_next.clicked.connect(lambda: self.seek(self.current_index + 1))
+        controls_layout.addWidget(self.btn_next)
+        
+        # Last Frame
+        self.btn_last = QtWidgets.QPushButton(">|")
+        self.btn_last.setFixedSize(30, 28)
+        self.btn_last.setStyleSheet(btn_style)
+        self.btn_last.setToolTip("Go to Last Frame")
+        self.btn_last.clicked.connect(self._go_to_end)
+        controls_layout.addWidget(self.btn_last)
+        
+        # Current Frame Input
+        self.curr_frame_edit = QtWidgets.QLineEdit("0")
+        self.curr_frame_edit.setFixedWidth(50)
+        self.curr_frame_edit.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.curr_frame_edit.setStyleSheet("""
+            QLineEdit {
+                background-color: #222;
+                color: #e0e0e0;
+                font-weight: bold;
                 border: 1px solid #444;
-                height: 10px;
-                background: #2a2a2a;
-                margin: 0px;
-                border-radius: 5px;
+                border-radius: 4px;
+                padding: 2px;
+                font-size: 13px;
             }
-            QSlider::sub-page:horizontal {
-                background: #4a90e2;
-                border-radius: 5px;
-            }
-            QSlider::add-page:horizontal {
-                background: #2a2a2a;
-                border-radius: 5px;
-            }
-            QSlider::handle:horizontal {
-                background: #c0c0c0;
-                border: 1px solid #555;
-                width: 22px;
-                height: 22px;
-                margin: -6px 0;
-                border-radius: 11px;
-            }
-            QSlider::handle:horizontal:hover { background: #fff; }
         """)
-        self.frame_slider.valueChanged.connect(self._show_frame)
-        self.hud_layout.addWidget(self.frame_slider, 1) # stretch
-
-        # 3. Info
-        self.frame_info = QtWidgets.QLabel("Frame: 0/0")
-        self.frame_info.setStyleSheet("color: #aaa; font-weight: bold; font-size: 12px;")
-        self.hud_layout.addWidget(self.frame_info)
-
-        # 4. FPS
-        self.hud_layout.addWidget(QtWidgets.QLabel("FPS:"))
+        self.curr_frame_edit.returnPressed.connect(self._on_frame_input)
+        controls_layout.addWidget(self.curr_frame_edit)
+        
+        controls_layout.addStretch(1) # Spacer
+        
+        # --- Drawing Tools ---
+        self.btn_draw = QtWidgets.QPushButton("Draw")
+        self.btn_draw.setCheckable(True)
+        self.btn_draw.setFixedSize(60, 28)
+        self.btn_draw.setToolTip("Toggle Annotation Mode")
+        self.btn_draw.setStyleSheet("""
+            QPushButton { background: transparent; color: #ccc; font-size: 13px; border: 1px solid #444; border-radius: 4px; font-weight: bold; }
+            QPushButton:checked { color: #fff; background: #c62828; border: 1px solid #ff5252; }
+            QPushButton:hover { background: #333; }
+        """)
+        self.btn_draw.clicked.connect(self._toggle_draw_mode)
+        controls_layout.addWidget(self.btn_draw)
+        
+        self.draw_color_combo = QtWidgets.QComboBox()
+        self.draw_color_combo.addItems(["Red", "Green", "Blue", "Yellow"])
+        self.draw_color_combo.setStyleSheet("""
+            QComboBox { background: #222; color: #ddd; border: 1px solid #444; border-radius: 3px; padding: 2px 5px; }
+            QComboBox::drop-down { border: none; }
+        """)
+        self.draw_color_combo.currentIndexChanged.connect(self._change_draw_color)
+        controls_layout.addWidget(self.draw_color_combo)
+        
+        self.btn_clear_draw = QtWidgets.QPushButton("Clear")
+        self.btn_clear_draw.setFixedSize(45, 28)
+        self.btn_clear_draw.setToolTip("Clear Annotations for Current Frame")
+        self.btn_clear_draw.setStyleSheet("""
+            QPushButton { background: transparent; color: #ccc; font-size: 13px; border: 1px solid #444; border-radius: 4px; }
+            QPushButton:hover { background: #333; color: white; }
+        """)
+        self.btn_clear_draw.clicked.connect(self._clear_annotations)
+        controls_layout.addWidget(self.btn_clear_draw)
+        
+        controls_layout.addSpacing(20)
+        
+        # 3. Right Controls: Channel, FPS, Loop, Gamma/Exp (Compact)
+        self.lbl_channel = QtWidgets.QLabel("RGB")
+        self.lbl_channel.setToolTip("Current Channel (Hotkeys: R, G, B, A, C)")
+        self.lbl_channel.setStyleSheet("color: #4a90e2; font-weight: bold; font-size: 14px; padding-right: 10px;")
+        controls_layout.addWidget(self.lbl_channel)
+        
+        # Pixel Probe Label
+        self.lbl_probe = QtWidgets.QLabel("")
+        self.lbl_probe.setMinimumWidth(250)
+        self.lbl_probe.setStyleSheet("color: #aaa; font-family: consolas, monospace; font-size: 12px; padding-right: 10px;")
+        controls_layout.addWidget(self.lbl_probe)
+        
+        # FPS
+        controls_layout.addWidget(QtWidgets.QLabel("FPS:"))
         self.fps_edit = QtWidgets.QLineEdit("24.0")
-        self.fps_edit.setFixedWidth(50)
-        self.fps_edit.setStyleSheet("background: #222; color: #ddd; border: 1px solid #444; padding: 4px;")
+        self.fps_edit.setFixedWidth(40)
+        self.fps_edit.setStyleSheet(input_style)
         self.fps_edit.editingFinished.connect(self._update_timer_interval)
-        self.hud_layout.addWidget(self.fps_edit)
+        controls_layout.addWidget(self.fps_edit)
         
-        # 5. Exposure
-        self.hud_layout.addSpacing(12)
+        controls_layout.addSpacing(10)
         
-        exp_lbl = QtWidgets.QPushButton("Exp:")
-        exp_lbl.setToolTip("Click to reset Exposure to 0.0")
-        exp_lbl.setFlat(True)
-        exp_lbl.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        exp_lbl.setStyleSheet("color: #aaa; font-weight: bold; border: none; padding: 2px 4px;")
-        exp_lbl.clicked.connect(self._reset_exposure)
-        self.hud_layout.addWidget(exp_lbl)
+        # Loop Checkbox (Icon style)
+        self.loop_btn = QtWidgets.QPushButton("Loop")
+        self.loop_btn.setCheckable(True)
+        self.loop_btn.setChecked(True)
+        self.loop_btn.setFixedSize(60, 28)
+        self.loop_btn.setToolTip("Loop Playback")
+        self.loop_btn.setStyleSheet("""
+            QPushButton { background: transparent; color: #ccc; font-size: 13px; border: none; font-weight: bold; }
+            QPushButton:checked { color: #4a90e2; }
+            QPushButton:hover { color: white; }
+        """)
+        self.loop_btn.toggled.connect(self._toggle_loop)
+        controls_layout.addWidget(self.loop_btn)
 
-        self.exp_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.exp_slider.setRange(-100, 100) # -10.0 to 10.0
-        self.exp_slider.setValue(int(self.exposure * 10))
-        self.exp_slider.setFixedWidth(100)
-        self.exp_slider.setStyleSheet(self.frame_slider.styleSheet()) # Reuse style
-        self.exp_slider.valueChanged.connect(self._on_exp_slider)
-        self.hud_layout.addWidget(self.exp_slider)
+        controls_layout.addSpacing(10)
+
+        # Exposure / Gamma (Compact spinboxes only)
+        # Exp
+        self.btn_reset_exp = QtWidgets.QPushButton("E")
+        self.btn_reset_exp.setToolTip("Exposure (Click to Reset)")
+        self.btn_reset_exp.setFixedSize(30, 28)
+        self.btn_reset_exp.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.btn_reset_exp.setStyleSheet("""
+            QPushButton { 
+                background: transparent; 
+                color: white; 
+                border: none; 
+                font-weight: bold; 
+                font-size: 15px;
+            }
+            QPushButton:hover { color: #4a90e2; }
+        """)
+        self.btn_reset_exp.clicked.connect(self._reset_exposure)
+        controls_layout.addWidget(self.btn_reset_exp)
         
         self.exp_spin = QtWidgets.QDoubleSpinBox()
         self.exp_spin.setRange(-10.0, 10.0)
         self.exp_spin.setSingleStep(0.1)
         self.exp_spin.setValue(self.exposure)
-        self.exp_spin.setFixedWidth(60)
-        self.exp_spin.setStyleSheet("background: #222; color: #ddd; padding: 4px;")
-        self.exp_spin.valueChanged.connect(self._on_exp_spin)
-        self.hud_layout.addWidget(self.exp_spin)
+        self.exp_spin.setFixedWidth(50)
+        self.exp_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.exp_spin.setStyleSheet("background: #222; color: #ddd; border: none;")
+        self.exp_spin.valueChanged.connect(self._on_exposure_changed)
+        controls_layout.addWidget(self.exp_spin)
         
-        # 6. Gamma
-        self.hud_layout.addSpacing(12)
+        # Gamma
+        self.btn_reset_gam = QtWidgets.QPushButton("G")
+        self.btn_reset_gam.setToolTip("Gamma (Click to Reset)")
+        self.btn_reset_gam.setFixedSize(30, 28)
+        self.btn_reset_gam.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.btn_reset_gam.setStyleSheet("""
+            QPushButton { 
+                background: transparent; 
+                color: white; 
+                border: none; 
+                font-weight: bold; 
+                font-size: 15px;
+            }
+            QPushButton:hover { color: #4a90e2; }
+        """)
+        self.btn_reset_gam.clicked.connect(self._reset_gamma)
+        controls_layout.addWidget(self.btn_reset_gam)
         
-        gam_lbl = QtWidgets.QPushButton("Gam:")
-        gam_lbl.setToolTip("Click to reset Gamma to 1.0")
-        gam_lbl.setFlat(True)
-        gam_lbl.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        gam_lbl.setStyleSheet("color: #aaa; font-weight: bold; border: none; padding: 2px 4px;")
-        gam_lbl.clicked.connect(self._reset_gamma)
-        self.hud_layout.addWidget(gam_lbl)
-
-        self.gam_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.gam_slider.setRange(1, 50) # 0.1 to 5.0
-        self.gam_slider.setValue(int(self.gamma * 10))
-        self.gam_slider.setFixedWidth(100)
-        self.gam_slider.setStyleSheet(self.frame_slider.styleSheet())
-        self.gam_slider.valueChanged.connect(self._on_gam_slider)
-        self.hud_layout.addWidget(self.gam_slider)
-
         self.gam_spin = QtWidgets.QDoubleSpinBox()
         self.gam_spin.setRange(0.1, 5.0)
         self.gam_spin.setSingleStep(0.1)
         self.gam_spin.setValue(self.gamma)
-        self.gam_spin.setFixedWidth(60)
-        self.gam_spin.setStyleSheet("background: #222; color: #ddd; padding: 4px;")
-        self.gam_spin.valueChanged.connect(self._on_gam_spin)
-        self.hud_layout.addWidget(self.gam_spin)
+        self.gam_spin.setFixedWidth(50)
+        self.gam_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.gam_spin.setStyleSheet("background: #222; color: #ddd; border: none;")
+        self.gam_spin.valueChanged.connect(self._on_gamma_changed)
+        controls_layout.addWidget(self.gam_spin)
+
+        self.hud_layout.addWidget(controls_container)
+
+
 
         # OCIO controls are now in the top bar (see _build_menu)
 
 
-    def _build_toolbar(self):
-        # Legacy toolbar method - deprecated by HUD
-        pass
+    # Legacy toolbar and duplicate control methods removed.
 
-    def play(self):
-        if self.playing: return
-        self.playing = True
-        self.play_btn.hide(); self.pause_btn.show()
-        if self.core.media and self.core.media.type == 'video':
-             self._elapsed_timer = QtCore.QElapsedTimer()
-             self._elapsed_timer.start()
-             self._play_start_index = self.current_index
-        self.timer.start()
-
-    def pause(self):
-        if not self.playing: return
-        self.playing = False
-        self.pause_btn.hide(); self.play_btn.show()
-        self.timer.stop()
-
-    def stop(self):
-        self.pause()
-        self.seek(0)
-
-    def seek(self, index):
-        if self.core.frame_count() == 0:
-            return
-        idx = max(0, min(self.core.frame_count() - 1, index))
-        # If scrubbing (dragging slider), maybe pause?
-        # For now, just show frame
-        self._show_frame(idx)
-        # Update elapsed anchor if playing video
-        if self.playing and self.core.media.type == 'video':
-            self._elapsed_timer.restart()
-            self._play_start_index = idx
 
     def _init_wipe_ui(self):
         """Create wipe slider row and add to main layout (hidden initially)."""
@@ -729,43 +909,110 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.core_b.cache.clear()
                 self.core_b.loader.clear_pending()
 
-    def _on_exp_slider(self, val: int):
-        float_val = val / 10.0
-        if self.exp_spin.value() != float_val:
-            self.exp_spin.blockSignals(True)
-            self.exp_spin.setValue(float_val)
-            self.exp_spin.blockSignals(False)
-            self._on_exposure_changed(float_val)
-
     def _on_exp_spin(self, val: float):
-        slider_val = int(val * 10)
-        if self.exp_slider.value() != slider_val:
-            self.exp_slider.blockSignals(True)
-            self.exp_slider.setValue(slider_val)
-            self.exp_slider.blockSignals(False)
         self._on_exposure_changed(val)
 
-    def _on_gam_slider(self, val: int):
-        float_val = val / 10.0
-        if self.gam_spin.value() != float_val:
-            self.gam_spin.blockSignals(True)
-            self.gam_spin.setValue(float_val)
-            self.gam_spin.blockSignals(False)
-            self._on_gamma_changed(float_val)
-
     def _on_gam_spin(self, val: float):
-        slider_val = int(val * 10)
-        if self.gam_slider.value() != slider_val:
-            self.gam_slider.blockSignals(True)
-            self.gam_slider.setValue(slider_val)
-            self.gam_slider.blockSignals(False)
         self._on_gamma_changed(val)
 
     def _on_exposure_changed(self, val: float):
         self.exposure = float(val)
+        self.color_manager.rebuild_processor()
+        self._sync_ocio_to_loader()
+        if self.core.frame_count():
+            self._show_frame(self.current_index)
+
+    def _reset_exposure(self):
+        self.exp_spin.setValue(0.0)
+
+    def _reset_gamma(self):
+        self.gam_spin.setValue(1.0)
         if self.core.frame_count():
             self._show_frame(self.current_index)
         self._save_prefs()
+
+    def _set_channel(self, mode: str):
+        if self.channel_mode == mode and mode != 'RGB':
+            self.channel_mode = 'RGB' # Toggle back to RGB
+        else:
+            self.channel_mode = mode
+            
+        if hasattr(self, 'lbl_channel'):
+            self.lbl_channel.setText(self.channel_mode)
+            if self.channel_mode == 'RGB':
+                self.lbl_channel.setStyleSheet("color: #4a90e2; font-weight: bold; font-size: 14px; padding-right: 10px;")
+            else:
+                self.lbl_channel.setStyleSheet("color: #ff4444; font-weight: bold; font-size: 14px; padding-right: 10px;")
+            
+        if self.core.frame_count():
+            self._show_frame(self.current_index)
+
+    def _on_pixel_probe(self, x: float, y: float):
+        if not hasattr(self, 'lbl_probe') or not hasattr(self, 'core') or self.core.frame_count() == 0:
+            return
+            
+        frame_raw = self.core.get_frame(self.current_index)
+        if frame_raw is None:
+            return
+            
+        ix, iy = int(x), int(y)
+        h, w = frame_raw.shape[:2]
+        
+        if 0 <= ix < w and 0 <= iy < h:
+            pixel = frame_raw[iy, ix]
+            if frame_raw.shape[2] >= 4:
+                r, g, b, a = pixel[:4]
+                text = f"X:{ix:<4} Y:{iy:<4} R:{r: .3f} G:{g: .3f} B:{b: .3f} A:{a: .3f}"
+            elif frame_raw.shape[2] >= 3:
+                r, g, b = pixel[:3]
+                text = f"X:{ix:<4} Y:{iy:<4} R:{r: .3f} G:{g: .3f} B:{b: .3f}"
+            else:
+                val = pixel[0]
+                text = f"X:{ix:<4} Y:{iy:<4} V:{val: .3f}"
+            self.lbl_probe.setText(text)
+        else:
+            self.lbl_probe.setText("")
+
+    def _toggle_draw_mode(self, enabled: bool):
+        self.viewport.is_drawing = enabled
+        self.viewport_b.is_drawing = enabled
+        if enabled:
+            # Init color on first activation
+            self._change_draw_color(self.draw_color_combo.currentIndex())
+            # Ensure visual is updated
+            if self.core.frame_count():
+                strokes = self.annotations.get(self.current_index, [])
+                self.viewport.set_annotations(strokes)
+                if self.side_by_side and hasattr(self, 'viewport_b'):
+                    self.viewport_b.set_annotations(strokes)
+
+    def _change_draw_color(self, idx: int):
+        colors = {
+            0: (1.0, 0.0, 0.0, 1.0), # Red
+            1: (0.0, 1.0, 0.0, 1.0), # Green
+            2: (0.0, 0.0, 1.0, 1.0), # Blue
+            3: (1.0, 1.0, 0.0, 1.0)  # Yellow
+        }
+        color = colors.get(idx, (1.0, 0.0, 0.0, 1.0))
+        self.viewport.draw_color = color
+        self.viewport_b.draw_color = color
+
+    def _on_stroke_finished(self, points: list, color: tuple):
+        if self.current_index not in self.annotations:
+            self.annotations[self.current_index] = []
+        
+        # Store stroke data
+        self.annotations[self.current_index].append({
+            'points': points,
+            'color': color
+        })
+
+    def _clear_annotations(self):
+        if self.current_index in self.annotations:
+            del self.annotations[self.current_index]
+            self.viewport.set_annotations([])
+            if self.side_by_side and hasattr(self, 'viewport_b'):
+                self.viewport_b.set_annotations([])
 
     def _on_gamma_changed(self, val: float):
         self.gamma = float(val)
@@ -780,12 +1027,68 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.play()
 
+    def _toggle_play_button(self):
+        """Handle Play/Pause from the HUD button."""
+        if self.btn_play.isChecked():
+             self.play()
+             self.btn_play.setText("||")
+        else:
+             self.pause()
+             self.btn_play.setText("▶")
+
+    def _toggle_loop(self, checked):
+        self.loop = checked
+        
+    def _go_to_start(self):
+        self.seek(0)
+        
+    def _go_to_end(self):
+        self.seek(max(0, self.core.frame_count() - 1))
+
+    def _on_frame_input(self):
+        """User typed a frame number in the box."""
+        try:
+            val = int(self.curr_frame_edit.text())
+            # Clamp? Maybe not, or clamp to available range
+            # But frame input usually expects 0-based index or 1-based?
+            # Let's assume 0-based index for now matching the slider.
+            self.seek(val)
+        except ValueError:
+            self._update_curr_frame_text()
+
+    def _update_range(self):
+        """Called when start/end range texts are edited."""
+        cnt = self.core.frame_count()
+        if cnt == 0: return
+        
+        try:
+            r_in = int(self.range_start_edit.text())
+            r_out = int(self.range_end_edit.text())
+        except ValueError:
+            # Revert to current
+            self.range_start_edit.setText(str(getattr(self, 'range_in', 0)))
+            self.range_end_edit.setText(str(getattr(self, 'range_out', cnt-1)))
+            return
+            
+        # Clamp
+        r_in = max(0, min(cnt-1, r_in))
+        r_out = max(r_in, min(cnt-1, r_out))
+        
+        self.range_in = r_in
+        self.range_out = r_out
+        
+        self.range_start_edit.setText(str(self.range_in))
+        self.range_end_edit.setText(str(self.range_out))
+        
+        # If playhead outside, move it?
+        if self.current_index < r_in:
+            self.seek(r_in)
+        elif self.current_index > r_out:
+            self.seek(r_out)
+
     def _reset_exposure(self):
         """Click Exp: label → reset exposure to 0.0."""
         self.exposure = 0.0
-        self.exp_slider.blockSignals(True)
-        self.exp_slider.setValue(0)
-        self.exp_slider.blockSignals(False)
         self.exp_spin.blockSignals(True)
         self.exp_spin.setValue(0.0)
         self.exp_spin.blockSignals(False)
@@ -796,15 +1099,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _reset_gamma(self):
         """Click Gam: label → reset gamma to 1.0."""
         self.gamma = 1.0
-        self.gam_slider.blockSignals(True)
-        self.gam_slider.setValue(10)  # 10 = 1.0 * 10
-        self.gam_slider.blockSignals(False)
         self.gam_spin.blockSignals(True)
         self.gam_spin.setValue(1.0)
         self.gam_spin.blockSignals(False)
         if self.core.frame_count():
             self._show_frame(self.current_index)
         self._save_prefs()
+
+
 
     def _on_compare_offset_changed(self, val: int):
         self.compare_offset = int(val)
@@ -927,8 +1229,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_ocio_to_loader()
         
         self.current_index = 0
-        self.frame_slider.setMaximum(max(0, self.core.frame_count() - 1))
+        cnt = self.core.frame_count()
+        self.frame_slider.setMaximum(max(0, cnt - 1))
         self._configure_frame_slider_ticks()
+        
+        # Init Range
+        self.range_in = 0
+        self.range_out = max(0, cnt - 1)
+        if hasattr(self, 'range_start_edit'):
+            self.range_start_edit.setText(str(self.range_in))
+        if hasattr(self, 'range_end_edit'):
+            self.range_end_edit.setText(str(self.range_out))
         
         # Reset viewport state to force auto-fit when frame loads
         self.viewport._last_shape = None
@@ -958,22 +1269,26 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._target_frame_index = -1
 
         # Process frame through color pipeline (always returns float32 0-1)
-        frame = self.color_manager.process(frame_raw, self.exposure, self.gamma)
+        frame = self.color_manager.process(frame_raw, self.exposure, self.gamma, self.channel_mode)
 
         # Display frame
         self.viewport.set_frame(frame)
-        self.frame_info.setText(f"Frame: {index + 1}/{self.core.frame_count()}")
         self.frame_slider.blockSignals(True)
         self.frame_slider.setValue(index)
         self.frame_slider.blockSignals(False)
         self.current_index = index
+        
+        # Apply annotations if drawing is enabled
+        if self.btn_draw.isChecked():
+            strokes = self.annotations.get(index, [])
+            self.viewport.set_annotations(strokes)
 
         if self.compare_loaded and self.core_b.frame_count() > 0:
             idx_b = max(0, min(self.core_b.frame_count() - 1, index + int(getattr(self, 'compare_offset', 0))))
             cframe_raw = self.core_b.get_frame(idx_b)
             
             if cframe_raw is not None:
-                cframe = self.color_manager.process(cframe_raw, self.exposure, self.gamma)
+                cframe = self.color_manager.process(cframe_raw, self.exposure, self.gamma, self.channel_mode)
             else:
                 cframe = None
             
@@ -981,6 +1296,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.viewport_b.show()
                 if cframe is not None:
                     self.viewport_b.set_frame(cframe)
+                if self.btn_draw.isChecked():
+                    self.viewport_b.set_annotations(strokes)
             elif self.wipe_mode:
                 self.viewport_b.hide()
                 if cframe is not None:
@@ -996,33 +1313,61 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def _advance_frame(self):
-        if self.core.frame_count() == 0:
+        cnt = self.core.frame_count()
+        if cnt == 0:
             return
-        # Video: drive frame index by elapsed time for realtime playback
-        if self.core.media and self.core.media.type == 'video' and self._elapsed_timer is not None:
-            fps = self.core.media_fps() or 24.0
-            elapsed_ms = self._elapsed_timer.elapsed()
-            frames_should_be = int((elapsed_ms / 1000.0) * fps)
-            target = self._play_start_index + frames_should_be
-            if target >= self.core.frame_count():
-                if self.loop:
-                    target = target % max(1, self.core.frame_count())
-                    # reset anchor to keep elapsed mapping stable over loops
-                    self._play_start_index = target
-                    self._elapsed_timer.restart()
-                else:
-                    self.pause(); return
-            if target != self.current_index:
-                self._show_frame(target)
-            return
-        # Images/sequences: simple step
-        nxt = self.current_index + 1
-        if nxt >= self.core.frame_count():
+
+        # Determine Range (fallback to full range if not set)
+        r_in = getattr(self, 'range_in', 0)
+        r_out = getattr(self, 'range_out', cnt - 1)
+        # Validate
+        r_in = max(0, min(cnt-1, r_in))
+        r_out = max(r_in, min(cnt-1, r_out))
+        
+        # Advance logic - unified elapsed-time approach for all media types
+        if self._elapsed_timer is None:
+            self._elapsed_timer = QtCore.QElapsedTimer()
+            self._elapsed_timer.start()
+        
+        fps = self.core.media_fps() or 24.0
+        ms = self._elapsed_timer.elapsed()
+        frames = int(ms * fps / 1000.0)
+        next_idx = self._play_start_index + frames
+            
+        # Check against Range Out
+        if next_idx > r_out:
             if self.loop:
-                nxt = 0
+                next_idx = r_in
+                self._elapsed_timer.restart()
+                self._play_start_index = r_in
             else:
-                self.pause(); return
-        self._show_frame(nxt)
+                next_idx = r_out
+                self.pause()
+                return # Stop advancement
+        
+        # Don't re-display the same frame
+        if next_idx == self.current_index:
+            return
+                
+        # --- Drop-frame tolerance ---
+        # If the target frame isn't cached, try the next sequential frame.
+        # This prevents stalling during playback on cache misses.
+        frame_raw = self.core.get_frame(next_idx)
+        if frame_raw is None:
+            # Skip up to 3 frames looking for a cached one
+            for skip in range(1, 4):
+                alt = next_idx + skip
+                if alt > r_out:
+                    break
+                frame_raw = self.core.get_frame(alt)
+                if frame_raw is not None:
+                    next_idx = alt
+                    break
+            if frame_raw is None:
+                return  # No cached frame available, wait for next tick
+
+        self.seek(next_idx)
+
 
     def seek(self, index: int):
         idx = int(index)
@@ -1033,14 +1378,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.playing:
             return
         self.playing = True
-        # Videos use a faster heartbeat + elapsed-time sync
-        if self.core.media and self.core.media.type == 'video':
-            self._elapsed_timer = QtCore.QElapsedTimer()
-            self._elapsed_timer.start()
-            self._play_start_index = self.current_index
-            self.timer.start(10)  # 10ms heartbeat for smoother sync
-        else:
-            self.timer.start(self._interval_ms())
+        
+        # Unified elapsed-time playback for all media types
+        self._elapsed_timer = QtCore.QElapsedTimer()
+        self._elapsed_timer.start()
+        self._play_start_index = self.current_index
+        
+        # 8ms heartbeat (~125fps cap) for smooth frame sync
+        self.timer.start(8)
+        
+        # Aggressive prefetch burst: load next 48 frames immediately
+        self.core.burst_prefetch(self.current_index, count=48)
+        
+        # Update UI
+        if hasattr(self, 'btn_play'):
+            self.btn_play.blockSignals(True)
+            self.btn_play.setChecked(True)
+            self.btn_play.setText("||")
+            self.btn_play.blockSignals(False)
+
         self._status_base = "Playing"
         self._update_status(self._status_base)
 
@@ -1050,8 +1406,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.playing = False
         self.timer.stop()
         self._elapsed_timer = None
+        
+        # Update UI
+        if hasattr(self, 'btn_play'):
+            self.btn_play.blockSignals(True)
+            self.btn_play.setChecked(False)
+            self.btn_play.setText("▶")
+            self.btn_play.blockSignals(False)
+
         self._status_base = "Paused"
         self._update_status(self._status_base)
+
 
     def stop(self):
         self.pause()
@@ -1317,6 +1682,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self._toggle_fullscreen(False)
         elif key == QtCore.Qt.Key.Key_Space:
             self.pause() if self.playing else self.play()
+        elif key == QtCore.Qt.Key.Key_C:
+            self._set_channel('RGB')
+        elif key == QtCore.Qt.Key.Key_R:
+            self._set_channel('R')
+        elif key == QtCore.Qt.Key.Key_G:
+            self._set_channel('G')
+        elif key == QtCore.Qt.Key.Key_B:
+            self._set_channel('B')
+        elif key == QtCore.Qt.Key.Key_A:
+            self._set_channel('A')
         elif key == QtCore.Qt.Key.Key_S:
             # Toggle Side-by-Side on/off
             if self.side_by_side and not self.wipe_mode:
@@ -1342,15 +1717,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # --- Gamma Shortcuts ([ / ]) ---
         elif key == QtCore.Qt.Key.Key_BracketLeft:
-            self.gam_slider.setValue(self.gam_slider.value() - 10) # -0.1
+            self.gam_spin.setValue(self.gam_spin.value() - 0.1)
         elif key == QtCore.Qt.Key.Key_BracketRight:
-            self.gam_slider.setValue(self.gam_slider.value() + 10) # +0.1
+            self.gam_spin.setValue(self.gam_spin.value() + 0.1)
             
         # --- Exposure Shortcuts (- / =) ---
         elif key == QtCore.Qt.Key.Key_Minus and not (event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier):
-            self.exp_slider.setValue(self.exp_slider.value() - 25) # -0.25
+            self.exp_spin.setValue(self.exp_spin.value() - 0.25)
         elif key in (QtCore.Qt.Key.Key_Equal, QtCore.Qt.Key.Key_Plus) and not (event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier):
-            self.exp_slider.setValue(self.exp_slider.value() + 25) # +0.25
+            self.exp_spin.setValue(self.exp_spin.value() + 0.25)
 
         # --- Zoom Shortcuts (Ctrl + / -) ---
         elif key in (QtCore.Qt.Key.Key_Plus, QtCore.Qt.Key.Key_Equal) and (event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier):
@@ -1366,6 +1741,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._update_zoom_label()
             else:
                 self._toggle_fullscreen(not self.fullscreen)
+        elif key == QtCore.Qt.Key.Key_U:
+            # U key also toggles fullscreen
+            self._toggle_fullscreen(not self.fullscreen)
         elif key == QtCore.Qt.Key.Key_PageDown:
             self._navigate_folder(1)   # Next media in folder
         elif key == QtCore.Qt.Key.Key_PageUp:
