@@ -9,16 +9,14 @@ from gui.settings_dialog import SettingsDialog
 
 
 class PlayheadSlider(QtWidgets.QSlider):
-    """Horizontal slider with a thin red playhead line drawn at current value.
-
-    Previously defined inside a method; lifted to module scope so it's available
-    when building the toolbar. Draws a red line at the handle center for a
-    clearer playhead indicator without custom overlay widgets."""
+    """Horizontal slider with playhead line and cached-frame indicators."""
     def __init__(self, *args, **kwargs):
         super().__init__(QtCore.Qt.Orientation.Horizontal, *args, **kwargs)
         self.setTickPosition(QtWidgets.QSlider.TickPosition.NoTicks)
         self.setTickInterval(1)
         self.setSingleStep(1)
+        self._cached_indices = set()  # Set of cached frame indices
+        self._show_cached = True  # Whether to show cached frame indicators
         self.setStyleSheet("""
             QSlider::groove:horizontal {
                 border: 1px solid #333;
@@ -41,6 +39,15 @@ class PlayheadSlider(QtWidgets.QSlider):
             }
         """)
 
+    def set_cached_indices(self, indices: set):
+        """Update the set of cached frame indices and repaint."""
+        self._cached_indices = indices
+        self.update()
+
+    def set_show_cached(self, show: bool):
+        self._show_cached = show
+        self.update()
+
     def paintEvent(self, event: QtGui.QPaintEvent):  # type: ignore[override]
         super().paintEvent(event)
         if self.maximum() <= self.minimum():
@@ -52,6 +59,19 @@ class PlayheadSlider(QtWidgets.QSlider):
         # Calculate track boundaries (handle is 10px wide, so 5px margin on each side)
         margin = 5
         track_w = self.width() - (margin * 2)
+        rng = self.maximum() - self.minimum()
+        
+        # --- Draw cached frame indicators (green bar at bottom of groove) ---
+        if self._show_cached and self._cached_indices and rng > 0:
+            cache_pen = QtGui.QPen(QtGui.QColor("#2ecc71"))  # Green
+            cache_pen.setWidth(2)
+            p.setPen(cache_pen)
+            groove_y = self.height() // 2 + 3  # Just below groove center
+            for idx in self._cached_indices:
+                if self.minimum() <= idx <= self.maximum():
+                    ratio = (idx - self.minimum()) / rng
+                    cx = margin + int(ratio * track_w)
+                    p.drawLine(cx, groove_y, cx, groove_y + 3)
         
         # Draw custom blue tick marks
         interval = self.tickInterval()
@@ -63,12 +83,12 @@ class PlayheadSlider(QtWidgets.QSlider):
             p.setPen(tick_pen)
             
             for val in range(self.minimum(), self.maximum() + 1, interval):
-                ratio = (val - self.minimum()) / (self.maximum() - self.minimum())
+                ratio = (val - self.minimum()) / rng
                 tx = margin + int(ratio * track_w)
                 p.drawLine(tx, self.height() - 4, tx, self.height())
 
         # Draw the playhead line
-        ratio = (self.value() - self.minimum()) / max(1, (self.maximum() - self.minimum()))
+        ratio = (self.value() - self.minimum()) / max(1, rng)
         px = margin + int(ratio * track_w)
         playhead_pen = QtGui.QPen(QtGui.QColor("#4a90e2"))
         playhead_pen.setWidth(2)
@@ -1133,12 +1153,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.gamma = float(self.prefs.get('gamma', 1.0))
             self.compare_offset = int(self.prefs.get('compare_offset', 0))
             
-            # Apply cache size if present
-            if 'cache_size' in self.prefs:
-                # We can't apply it here easily because self.core might not be fully init or we want to do it later.
-                # Actually getattr(self.core) in init handles defaults. 
-                # We should apply it after core init.
-                pass
+            # Apply cache settings if present
+            if 'cache_gb' in self.prefs:
+                self.core.set_cache_gb(float(self.prefs['cache_gb']))
+            if 'cache_enabled' in self.prefs:
+                self.core.cache_enabled = self.prefs['cache_enabled']
+            if 'preload_cache' in self.prefs:
+                self.core.prefetch_enabled = self.prefs['preload_cache']
         except Exception:
             self.prefs = {}
 
@@ -1151,6 +1172,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.prefs['exposure'] = self.exposure
             self.prefs['gamma'] = self.gamma
             self.prefs['compare_offset'] = getattr(self, 'compare_offset', 0)
+            self.prefs['cache_gb'] = self.core.cache_gb
+            self.prefs['cache_enabled'] = self.core.cache_enabled
+            self.prefs['preload_cache'] = self.core.prefetch_enabled
+            self.prefs['show_cached_timeline'] = self.prefs.get('show_cached_timeline', True)
             
             with open(_PREFS_PATH, 'w', encoding='utf-8') as f:
                 json.dump(self.prefs, f, indent=2)
@@ -1168,11 +1193,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self.prefs.update(new_prefs)
             
             # Apply immediate changes
-            # 1. Cache
-            if 'cache_size' in self.prefs:
-                self._apply_cache_capacity(int(self.prefs['cache_size']))
+            # 1. Cache GB budget
+            cache_gb = self.prefs.get('cache_gb', 4.0)
+            self.core.set_cache_gb(cache_gb)
+            if hasattr(self, 'core_b') and self.core_b:
+                self.core_b.set_cache_gb(cache_gb)
             
-            # 2. Defaults (applied on next load)
+            # 2. Cache enabled/disabled
+            self.core.cache_enabled = self.prefs.get('cache_enabled', True)
+            if hasattr(self, 'core_b') and self.core_b:
+                self.core_b.cache_enabled = self.core.cache_enabled
+            
+            # 3. Prefetch toggle
+            self.core.prefetch_enabled = self.prefs.get('preload_cache', True)
+            if hasattr(self, 'core_b') and self.core_b:
+                self.core_b.prefetch_enabled = self.core.prefetch_enabled
+            
+            # 4. Show cached in timeline
+            self.frame_slider.set_show_cached(self.prefs.get('show_cached_timeline', True))
+            
+            # 5. Defaults (applied on next load)
             
             self._save_prefs()
 
@@ -1451,10 +1491,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.core.media:
             self.status.showMessage(self._status_base)
             return
-        cached, cap, pct = self.core.cache_stats()
+        cached, cap, pct, mem_mb = self.core.cache_stats()
         fps = self.core.media_fps() or 24.0
         tc = self._format_timecode(self.current_index, fps)
-        self.status.showMessage(f"{self._status_base} | Cache {cached}/{cap} ({pct:.0f}%) | {tc}")
+        if mem_mb > 1024:
+            mem_str = f"{mem_mb/1024:.1f}GB"
+        else:
+            mem_str = f"{mem_mb:.0f}MB"
+        self.status.showMessage(f"{self._status_base} | Cache {cached}/{cap} ({pct:.0f}%) {mem_str} | {tc}")
+        
+        # Update cached frame indicators on timeline
+        if self.prefs.get('show_cached_timeline', True):
+            self.frame_slider.set_cached_indices(self.core.get_cached_indices())
 
     def _format_timecode(self, frame: int, fps: float) -> str:
         if fps <= 0:

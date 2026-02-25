@@ -16,5 +16,9 @@
       "input": null,
       "output": null
     }
-  }
+  },
+  "cache_gb": 4.0,
+  "cache_enabled": true,
+  "preload_cache": false,
+  "show_cached_timeline": true
 }

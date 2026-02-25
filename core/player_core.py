@@ -550,6 +550,9 @@ class PlayerCore:
         self.current_frame: int = 0
         self.cache_capacity = cache_capacity
         self.prefetch_enabled = prefetch_enabled
+        self.cache_enabled = True  # Toggle for enable/disable cache
+        self.cache_gb = 4.0  # Default 4 GB memory budget
+        self._frame_mem_bytes = 0  # Auto-set when first frame is cached
         self.media: Optional[MediaInfo] = None
 
         self.cache_lock = threading.Lock()
@@ -632,6 +635,15 @@ class PlayerCore:
             self.clock.update(index)
             self.current_frame = index
 
+        # If cache disabled, load directly (no caching)
+        if not self.cache_enabled:
+            path = self._get_path(index)
+            self.loader.request(path, index, priority=0)
+            with self.cache_lock:
+                if index in self.cache:
+                    return self.cache.pop(index)
+            return None
+
         # Check cache (release lock BEFORE calling prefetch!)
         frame = None
         with self.cache_lock:
@@ -640,6 +652,10 @@ class PlayerCore:
                 frame = self.cache[index]
 
         if frame is not None:
+            # Auto-detect frame memory size for GB-based capacity calculation
+            if self._frame_mem_bytes == 0:
+                self._frame_mem_bytes = frame.nbytes
+                self._recalc_capacity_from_gb()
             # Prefetch OUTSIDE the lock to avoid deadlock
             if self.prefetch_enabled:
                 self.predictive_prefetch(index, self.last_direction)
@@ -698,13 +714,32 @@ class PlayerCore:
             while len(self.cache) > self.cache_capacity:
                 self.cache.popitem(last=False)
 
+    def _recalc_capacity_from_gb(self):
+        """Recalculate frame capacity from GB budget and per-frame memory size."""
+        if self._frame_mem_bytes > 0:
+            max_frames = int((self.cache_gb * 1024 * 1024 * 1024) / self._frame_mem_bytes)
+            self.cache_capacity = max(10, max_frames)
+
     def set_cache_capacity(self, capacity: int):
         self.cache_capacity = capacity
         self._prune_cache()
 
+    def set_cache_gb(self, gb: float):
+        """Set cache budget in gigabytes. Auto-calculates frame capacity."""
+        self.cache_gb = max(0.5, gb)
+        self._recalc_capacity_from_gb()
+        self._prune_cache()
+
+    def get_cached_indices(self) -> set:
+        """Return set of cached frame indices for timeline display."""
+        with self.cache_lock:
+            return set(self.cache.keys())
+
     def cache_stats(self):
         with self.cache_lock:
             count = len(self.cache)
+            mem_bytes = count * self._frame_mem_bytes if self._frame_mem_bytes > 0 else 0
         cap = self.cache_capacity
         pct = (count / cap * 100.0) if cap > 0 else 0.0
-        return count, cap, pct
+        mem_mb = mem_bytes / (1024 * 1024)
+        return count, cap, pct, mem_mb

@@ -20,16 +20,45 @@ class SettingsDialog(QtWidgets.QDialog):
         self.gen_layout = QtWidgets.QVBoxLayout(self.gen_tab)
         self.tabs.addTab(self.gen_tab, "General")
         
-        # Cache
-        cache_group = QtWidgets.QGroupBox("Cache")
-        cg_layout = QtWidgets.QFormLayout(cache_group)
-        self.cache_spin = QtWidgets.QSpinBox()
-        self.cache_spin.setRange(50, 10000)
-        self.cache_spin.setSingleStep(50)
-        self.cache_spin.setValue(self.prefs.get('cache_size', 500))
-        self.cache_spin.setSuffix(" frames")
-        cg_layout.addRow("Capacity:", self.cache_spin)
-        cg_layout.addRow("Capacity:", self.cache_spin)
+        # Cache (DJV-style Memory Cache)
+        cache_group = QtWidgets.QGroupBox("Memory Cache")
+        cg_layout = QtWidgets.QVBoxLayout(cache_group)
+        
+        cache_desc = QtWidgets.QLabel(
+            "The memory cache stores decoded frames in RAM for instant playback.\n"
+            "When disabled, frames are streamed directly from disk."
+        )
+        cache_desc.setWordWrap(True)
+        cache_desc.setStyleSheet("color: #888; font-size: 11px; margin-bottom: 6px;")
+        cg_layout.addWidget(cache_desc)
+        
+        self.cache_enable_chk = QtWidgets.QCheckBox("Enable the memory cache")
+        self.cache_enable_chk.setChecked(self.prefs.get('cache_enabled', True))
+        cg_layout.addWidget(self.cache_enable_chk)
+        
+        gb_row = QtWidgets.QHBoxLayout()
+        gb_label = QtWidgets.QLabel("Cache size (gigabytes):")
+        self.cache_gb_spin = QtWidgets.QDoubleSpinBox()
+        self.cache_gb_spin.setRange(0.5, 64.0)
+        self.cache_gb_spin.setSingleStep(0.5)
+        self.cache_gb_spin.setDecimals(2)
+        self.cache_gb_spin.setValue(self.prefs.get('cache_gb', 4.0))
+        self.cache_gb_spin.setSuffix(" GB")
+        gb_row.addWidget(gb_label)
+        gb_row.addWidget(self.cache_gb_spin)
+        gb_row.addStretch()
+        cg_layout.addLayout(gb_row)
+        
+        self.preload_chk = QtWidgets.QCheckBox("Pre-load cache frames")
+        self.preload_chk.setChecked(self.prefs.get('preload_cache', True))
+        self.preload_chk.setToolTip("When enabled, frames ahead of the playhead are loaded into cache automatically.")
+        cg_layout.addWidget(self.preload_chk)
+        
+        self.show_cached_chk = QtWidgets.QCheckBox("Display cached frames in timeline")
+        self.show_cached_chk.setChecked(self.prefs.get('show_cached_timeline', True))
+        self.show_cached_chk.setToolTip("Shows a green indicator on the timeline for frames that are currently cached in memory.")
+        cg_layout.addWidget(self.show_cached_chk)
+        
         self.gen_layout.addWidget(cache_group)
         
         # OCIO Config
@@ -125,7 +154,10 @@ class SettingsDialog(QtWidgets.QDialog):
             
     def get_prefs(self):
         # Update prefs dict from UI
-        self.prefs['cache_size'] = self.cache_spin.value()
+        self.prefs['cache_enabled'] = self.cache_enable_chk.isChecked()
+        self.prefs['cache_gb'] = self.cache_gb_spin.value()
+        self.prefs['preload_cache'] = self.preload_chk.isChecked()
+        self.prefs['show_cached_timeline'] = self.show_cached_chk.isChecked()
         self.prefs['ocio_config'] = self.ocio_path_edit.text().strip()
         
         if 'defaults' not in self.prefs:
