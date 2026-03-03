@@ -53,6 +53,12 @@ class VispyViewport(QtWidgets.QWidget):
         # Wire up click detection and canvas mouse events
         self._init_click_detection()
 
+    def set_exposure(self, val: float):
+        pass # Exposure handled on CPU now
+
+    def set_gamma(self, val: float):
+        pass
+
     @property
     def is_drawing(self):
         return getattr(self, '_is_drawing', False)

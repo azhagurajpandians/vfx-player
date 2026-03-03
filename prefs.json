@@ -2,7 +2,7 @@
   "ocio_input": "ACES - ACEScg",
   "ocio_output": "Output - sRGB",
   "ocio_enabled": true,
-  "exposure": 0.0,
+  "exposure": 1.647,
   "gamma": 1.0,
   "compare_offset": 0,
   "cache_size": 500,

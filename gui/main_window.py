@@ -266,6 +266,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.playing = False
         self.current_index = 0
         self.loop = True
+        self.playback_speed = 1.0
         self._elapsed_timer = None
         self._play_start_index = 0
 
@@ -523,64 +524,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self.loop_btn.toggled.connect(self._toggle_loop)
         controls_layout.addWidget(self.loop_btn)
 
+        # --- Playback Speed Control ---
+        self.speed_btn = QtWidgets.QPushButton("1x")
+        self.speed_btn.setFixedSize(50, 28)
+        self.speed_btn.setToolTip("Playback Speed. Click to change.")
+        self.speed_btn.setStyleSheet("""
+            QPushButton { 
+                background: transparent; 
+                color: #ccc; 
+                font-size: 13px; 
+                border: 1px solid #444; 
+                border-radius: 4px; 
+                font-weight: bold;
+                font-family: consolas, monospace;
+            }
+            QPushButton:hover { background: #333; color: white; border: 1px solid #666; }
+        """)
+        
+        # Create Menu for speed selection
+        speed_menu = QtWidgets.QMenu(self)
+        speed_menu.setStyleSheet("""
+            QMenu { background: #222; color: #ddd; border: 1px solid #444; }
+            QMenu::item:selected { background: #444; }
+        """)
+        
+        self.speed_speeds = [0.25, 0.5, 1.0, 1.5, 2.0, 4.0]
+        for s in self.speed_speeds:
+            act = speed_menu.addAction(f"{s}x")
+            act.triggered.connect(lambda checked, val=s: self._on_speed_changed(val))
+        
+        self.speed_btn.setMenu(speed_menu)
+        controls_layout.addWidget(self.speed_btn)
+
         controls_layout.addSpacing(10)
 
-        # Exposure / Gamma (Compact spinboxes only)
-        # Exp
-        self.btn_reset_exp = QtWidgets.QPushButton("E")
-        self.btn_reset_exp.setToolTip("Exposure (Click to Reset)")
-        self.btn_reset_exp.setFixedSize(30, 28)
-        self.btn_reset_exp.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.btn_reset_exp.setStyleSheet("""
-            QPushButton { 
-                background: transparent; 
-                color: white; 
-                border: none; 
-                font-weight: bold; 
-                font-size: 15px;
-            }
-            QPushButton:hover { color: #4a90e2; }
-        """)
-        self.btn_reset_exp.clicked.connect(self._reset_exposure)
-        controls_layout.addWidget(self.btn_reset_exp)
-        
-        self.exp_spin = QtWidgets.QDoubleSpinBox()
-        self.exp_spin.setRange(-10.0, 10.0)
-        self.exp_spin.setSingleStep(0.1)
-        self.exp_spin.setValue(self.exposure)
-        self.exp_spin.setFixedWidth(50)
-        self.exp_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.exp_spin.setStyleSheet("background: #222; color: #ddd; border: none;")
-        self.exp_spin.valueChanged.connect(self._on_exposure_changed)
-        controls_layout.addWidget(self.exp_spin)
-        
-        # Gamma
-        self.btn_reset_gam = QtWidgets.QPushButton("G")
-        self.btn_reset_gam.setToolTip("Gamma (Click to Reset)")
-        self.btn_reset_gam.setFixedSize(30, 28)
-        self.btn_reset_gam.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.btn_reset_gam.setStyleSheet("""
-            QPushButton { 
-                background: transparent; 
-                color: white; 
-                border: none; 
-                font-weight: bold; 
-                font-size: 15px;
-            }
-            QPushButton:hover { color: #4a90e2; }
-        """)
-        self.btn_reset_gam.clicked.connect(self._reset_gamma)
-        controls_layout.addWidget(self.btn_reset_gam)
-        
-        self.gam_spin = QtWidgets.QDoubleSpinBox()
-        self.gam_spin.setRange(0.1, 5.0)
-        self.gam_spin.setSingleStep(0.1)
-        self.gam_spin.setValue(self.gamma)
-        self.gam_spin.setFixedWidth(50)
-        self.gam_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.gam_spin.setStyleSheet("background: #222; color: #ddd; border: none;")
-        self.gam_spin.valueChanged.connect(self._on_gamma_changed)
-        controls_layout.addWidget(self.gam_spin)
+        controls_layout.addSpacing(10)
+
+        # Bottom HUD now focuses on playback/timeline.
+        # Exposure and Gamma have moved to the top bar.
 
         self.hud_layout.addWidget(controls_container)
 
@@ -638,15 +619,107 @@ class MainWindow(QtWidgets.QMainWindow):
         # Ensure it's transparent to blend with menu bar
         self.viewer_container.setStyleSheet("background: transparent;")
         vc_layout = QtWidgets.QHBoxLayout(self.viewer_container)
-        vc_layout.setContentsMargins(10, 2, 0, 2) # Add slight vertical padding
-        vc_layout.setSpacing(5)
+        vc_layout.setContentsMargins(10, 0, 5, 0) # Less horizontal padding
+        vc_layout.setSpacing(6) # Tighter spacing
         
-        lbl = QtWidgets.QLabel("Viewer:")
-        lbl.setStyleSheet("color: #ddd;") # Ensure visibility
+        # --- NEW GPU GAIN / GAMMA SLIDERS ---
+        # Exposure (Gain)
+        self.exp_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.exp_slider.setRange(-8000, 8000) # Maps to -8.0 to 8.0 stop
+        self.exp_slider.setValue(int(self.exposure * 1000))
+        self.exp_slider.setFixedWidth(80) # Narrower
+        self.exp_slider.setToolTip("Exposure (f-stops). Click 'E' to reset.")
+        self.exp_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid #555;
+                height: 4px;
+                background: #333;
+                margin: 2px 0;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #bbb;
+                border: 1px solid #777;
+                width: 10px;
+                height: 14px;
+                margin: -6px 0;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #ddd;
+            }
+        """)
+        
+        self.lbl_exp_val = QtWidgets.QLabel(f"{self.exposure:+.2f}")
+        self.lbl_exp_val.setFixedWidth(35)
+        self.lbl_exp_val.setStyleSheet("color: #ccc; font-family: consolas, monospace; font-size: 11px;")
+        
+        self.exp_slider.valueChanged.connect(self._on_exposure_changed)
+        
+        exp_box = QtWidgets.QHBoxLayout()
+        exp_box.setSpacing(2)
+        btn_e = QtWidgets.QPushButton("E")
+        btn_e.setFixedSize(16, 16)
+        btn_e.setStyleSheet("background: #444; color: white; border-radius: 8px; font-weight: bold; font-size: 9px;")
+        btn_e.clicked.connect(self._reset_exposure)
+        exp_box.addWidget(btn_e)
+        exp_box.addWidget(self.exp_slider)
+        exp_box.addWidget(self.lbl_exp_val)
+        vc_layout.addLayout(exp_box)
+        
+        # Gamma
+        self.gam_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.gam_slider.setRange(100, 4000) # Maps to 0.1 to 4.0
+        self.gam_slider.setValue(int(self.gamma * 1000))
+        self.gam_slider.setFixedWidth(80) # Narrower
+        self.gam_slider.setToolTip("Gamma. Click 'G' to reset.")
+        self.gam_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid #555;
+                height: 4px;
+                background: #333;
+                margin: 2px 0;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #bbb;
+                border: 1px solid #777;
+                width: 10px;
+                height: 14px;
+                margin: -6px 0;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #ddd;
+            }
+        """)
+        
+        self.lbl_gam_val = QtWidgets.QLabel(f"{self.gamma:.2f}")
+        self.lbl_gam_val.setFixedWidth(30)
+        self.lbl_gam_val.setStyleSheet("color: #ccc; font-family: consolas, monospace; font-size: 11px;")
+        
+        self.gam_slider.valueChanged.connect(self._on_gamma_changed)
+        
+        gam_box = QtWidgets.QHBoxLayout()
+        gam_box.setSpacing(2)
+        btn_g = QtWidgets.QPushButton("G")
+        btn_g.setFixedSize(16, 16)
+        btn_g.setStyleSheet("background: #444; color: white; border-radius: 8px; font-weight: bold; font-size: 9px;")
+        btn_g.clicked.connect(self._reset_gamma)
+        gam_box.addWidget(btn_g)
+        gam_box.addWidget(self.gam_slider)
+        gam_box.addWidget(self.lbl_gam_val)
+        vc_layout.addLayout(gam_box)
+        
+        vc_layout.addSpacing(5)
+        
+        lbl = QtWidgets.QLabel("V:") # Shortened from "Viewer:"
+        lbl.setStyleSheet("color: #888;") 
         vc_layout.addWidget(lbl)
         
         self.viewer_combo = QtWidgets.QComboBox()
-        self.viewer_combo.setMinimumWidth(200) # Slightly wider
+        self.viewer_combo.setMinimumWidth(100) # Narrower
+        self.viewer_combo.setMaximumWidth(150)
         self.viewer_combo.setStyleSheet("""
             QComboBox { 
                 background-color: #333; 
@@ -808,6 +881,7 @@ class MainWindow(QtWidgets.QMainWindow):
             in_lbl.setStyleSheet("color: #aaa;")
             vc_layout.addWidget(in_lbl)
             self.ocio_input_combo = QtWidgets.QComboBox()
+            self.ocio_input_combo.setMaximumWidth(120) # Prevent it from pushing menus too far
             self.ocio_input_combo.addItems(self.color_manager.input_choices)
             if self.color_manager.input_cs:
                 self.ocio_input_combo.setCurrentText(self.color_manager.input_cs)
@@ -820,6 +894,7 @@ class MainWindow(QtWidgets.QMainWindow):
             out_lbl.setStyleSheet("color: #aaa;")
             vc_layout.addWidget(out_lbl)
             self.ocio_output_combo = QtWidgets.QComboBox()
+            self.ocio_output_combo.setMaximumWidth(120)
             self.ocio_output_combo.addItems(self.color_manager.output_choices)
             if self.color_manager.output_cs:
                 self.ocio_output_combo.setCurrentText(self.color_manager.output_cs)
@@ -929,27 +1004,33 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.core_b.cache.clear()
                 self.core_b.loader.clear_pending()
 
-    def _on_exp_spin(self, val: float):
-        self._on_exposure_changed(val)
-
-    def _on_gam_spin(self, val: float):
-        self._on_gamma_changed(val)
-
-    def _on_exposure_changed(self, val: float):
-        self.exposure = float(val)
-        self.color_manager.rebuild_processor()
-        self._sync_ocio_to_loader()
+    def _on_exposure_changed(self, val: int):
+        self.exposure = float(val / 1000.0)
+        if hasattr(self, 'lbl_exp_val'):
+            self.lbl_exp_val.setText(f"{self.exposure:+.2f}")
+            
+        # Refresh current frame with new exposure (no cache clear!)
         if self.core.frame_count():
             self._show_frame(self.current_index)
+        
+        self._save_prefs()
+
+    def _on_gamma_changed(self, val: int):
+        self.gamma = float(val / 1000.0)
+        if hasattr(self, 'lbl_gam_val'):
+            self.lbl_gam_val.setText(f"{self.gamma:.2f}")
+            
+        # Refresh current frame with new gamma (no cache clear!)
+        if self.core.frame_count():
+            self._show_frame(self.current_index)
+            
+        self._save_prefs()
 
     def _reset_exposure(self):
-        self.exp_spin.setValue(0.0)
+        self.exp_slider.setValue(0)
 
     def _reset_gamma(self):
-        self.gam_spin.setValue(1.0)
-        if self.core.frame_count():
-            self._show_frame(self.current_index)
-        self._save_prefs()
+        self.gam_slider.setValue(1000)
 
     def _set_channel(self, mode: str):
         if self.channel_mode == mode and mode != 'RGB':
@@ -1034,11 +1115,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.side_by_side and hasattr(self, 'viewport_b'):
                 self.viewport_b.set_annotations([])
 
-    def _on_gamma_changed(self, val: float):
-        self.gamma = float(val)
-        if self.core.frame_count():
-            self._show_frame(self.current_index)
-        self._save_prefs()
+    # Reset methods redefined above
 
     def _toggle_play_pause(self):
         """Single click on viewport: toggle play/pause."""
@@ -1106,25 +1183,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif self.current_index > r_out:
             self.seek(r_out)
 
-    def _reset_exposure(self):
-        """Click Exp: label → reset exposure to 0.0."""
-        self.exposure = 0.0
-        self.exp_spin.blockSignals(True)
-        self.exp_spin.setValue(0.0)
-        self.exp_spin.blockSignals(False)
-        if self.core.frame_count():
-            self._show_frame(self.current_index)
-        self._save_prefs()
-
-    def _reset_gamma(self):
-        """Click Gam: label → reset gamma to 1.0."""
-        self.gamma = 1.0
-        self.gam_spin.blockSignals(True)
-        self.gam_spin.setValue(1.0)
-        self.gam_spin.blockSignals(False)
-        if self.core.frame_count():
-            self._show_frame(self.current_index)
-        self._save_prefs()
+    # Reset methods redefined above
 
 
 
@@ -1308,7 +1367,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._pending_frame_timer.stop()
                 self._target_frame_index = -1
 
-        # Process frame through color pipeline (always returns float32 0-1)
+        # Process frame through color pipeline (NumPy CPU)
         frame = self.color_manager.process(frame_raw, self.exposure, self.gamma, self.channel_mode)
 
         # Display frame
@@ -1369,7 +1428,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._elapsed_timer = QtCore.QElapsedTimer()
             self._elapsed_timer.start()
         
-        fps = self.core.media_fps() or 24.0
+        fps = (self.core.media_fps() or 24.0) * self.playback_speed
         ms = self._elapsed_timer.elapsed()
         frames = int(ms * fps / 1000.0)
         next_idx = self._play_start_index + frames
@@ -1483,6 +1542,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def _update_timer_interval(self):
         if self.playing:
             self.timer.start(self._interval_ms())
+
+    def _on_speed_changed(self, speed: float):
+        self.playback_speed = speed
+        if hasattr(self, 'speed_btn'):
+            self.speed_btn.setText(f"{speed}x")
+        
+        # If playing, we need to reset the elapsed timer and start index 
+        # so the speed change feels seamless and doesn't jump.
+        if self.playing:
+            self._elapsed_timer.restart()
+            self._play_start_index = self.current_index
+            
+        self._refresh_status_metrics()
 
     def _update_status(self, msg: str):
         self.status.showMessage(msg)
@@ -1762,18 +1834,52 @@ class MainWindow(QtWidgets.QMainWindow):
             self.seek(0)
         elif key == QtCore.Qt.Key.Key_End:
             self.seek(self.core.frame_count() - 1)
+        
+        # --- Playback Navigation (JKL) ---
+        elif key == QtCore.Qt.Key.Key_L:
+            if not self.playing:
+                self.play()
+                self._on_speed_changed(1.0)
+            else:
+                # Cycle forward speeds
+                fwd_speeds = [1.0, 1.5, 2.0, 4.0]
+                try:
+                    idx = fwd_speeds.index(self.playback_speed)
+                    next_s = fwd_speeds[(idx + 1) % len(fwd_speeds)]
+                except ValueError:
+                    next_s = 1.0
+                self._on_speed_changed(next_s)
+        elif key == QtCore.Qt.Key.Key_K:
+            self.pause()
+        elif key == QtCore.Qt.Key.Key_J:
+            # For now, J acts as "Play 1x" or we could implement reverse later.
+            # Industry JKL: J is reverse, but let's stick to forward/pause for now.
+            if not self.playing:
+                self.play()
+                self._on_speed_changed(1.0) # Placeholder for reverse
+        
+        # --- Speed Presets (Alt + 0/1/2/3) ---
+        elif event.modifiers() & QtCore.Qt.KeyboardModifier.AltModifier:
+            if key == QtCore.Qt.Key.Key_1:
+                self._on_speed_changed(1.0)
+            elif key == QtCore.Qt.Key.Key_2:
+                self._on_speed_changed(2.0)
+            elif key == QtCore.Qt.Key.Key_3:
+                self._on_speed_changed(4.0)
+            elif key == QtCore.Qt.Key.Key_0:
+                self._on_speed_changed(0.5)
 
         # --- Gamma Shortcuts ([ / ]) ---
         elif key == QtCore.Qt.Key.Key_BracketLeft:
-            self.gam_spin.setValue(self.gam_spin.value() - 0.1)
+            self.gam_slider.setValue(self.gam_slider.value() - 100)
         elif key == QtCore.Qt.Key.Key_BracketRight:
-            self.gam_spin.setValue(self.gam_spin.value() + 0.1)
+            self.gam_slider.setValue(self.gam_slider.value() + 100)
             
         # --- Exposure Shortcuts (- / =) ---
         elif key == QtCore.Qt.Key.Key_Minus and not (event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier):
-            self.exp_spin.setValue(self.exp_spin.value() - 0.25)
+            self.exp_slider.setValue(self.exp_slider.value() - 250)
         elif key in (QtCore.Qt.Key.Key_Equal, QtCore.Qt.Key.Key_Plus) and not (event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier):
-            self.exp_spin.setValue(self.exp_spin.value() + 0.25)
+            self.exp_slider.setValue(self.exp_slider.value() + 250)
 
         # --- Zoom Shortcuts (Ctrl + / -) ---
         elif key in (QtCore.Qt.Key.Key_Plus, QtCore.Qt.Key.Key_Equal) and (event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier):
