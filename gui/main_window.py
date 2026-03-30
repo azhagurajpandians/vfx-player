@@ -2226,8 +2226,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def keyPressEvent(self, event: QtGui.QKeyEvent):  # type: ignore[override]
         key = event.key()
         if key == QtCore.Qt.Key.Key_Escape:
-            if self.isFullScreen():
-                self._toggle_fullscreen(False)
+            self.close()
             event.accept()
             return
         elif key == QtCore.Qt.Key.Key_Space:
@@ -2362,6 +2361,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 'menu_visible': self.menuBar().isVisible(),
                 'status_visible': self.statusBar().isVisible(),
                 'hud_visible': self.hud_container.isVisible(),
+                'was_maximized': self.isMaximized()
             }
             self.menuBar().hide()
             self.statusBar().hide()
@@ -2371,8 +2371,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._wipe_row.hide()
             self.showFullScreen()
         else:
-            self.showNormal()
             state = getattr(self, '_pre_fullscreen_state', {})
+            if state.get('was_maximized', False):
+                self.showMaximized()
+            else:
+                self.showNormal()
+                
             if state.get('menu_visible', True):
                 self.menuBar().show()
             if state.get('status_visible', True):

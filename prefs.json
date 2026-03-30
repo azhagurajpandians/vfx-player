@@ -3,7 +3,7 @@
   "ocio_output": "Output - sRGB",
   "ocio_enabled": true,
   "exposure": 0.0,
-  "gamma": 0.1,
+  "gamma": 1.0,
   "compare_offset": 0,
   "cache_size": 500,
   "ocio_config": "D:/exrtojpg/VFXPlayer/.knacktools/ocioconfig/OpenColorIOConfigs/aces_1.2/config.ocio",
@@ -23,6 +23,6 @@
   "show_cached_timeline": true,
   "economy_mode": true,
   "playback_strategy": "performance",
-  "audio_volume": 0.21,
+  "audio_volume": 1.0,
   "audio_muted": false
 }

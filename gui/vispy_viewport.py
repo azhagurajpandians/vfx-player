@@ -63,11 +63,15 @@ class VispyViewport(QtWidgets.QWidget):
     def _on_canvas_key_press(self, event):
         """Consume Esc key at the VisPy level to prevent default behavior."""
         if event.key == 'Escape':
+            if self.main_window:
+                QtCore.QTimer.singleShot(0, self.main_window.close)
             event.handled = True
 
     def keyPressEvent(self, event: QtGui.QKeyEvent):
         """Handle Qt-level key events; ensure Esc is consumed."""
         if event.key() == QtCore.Qt.Key.Key_Escape:
+            if self.main_window:
+                QtCore.QTimer.singleShot(0, self.main_window.close)
             event.accept()
             return
         super().keyPressEvent(event)
