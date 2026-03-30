@@ -1,11 +1,15 @@
 """Enhanced PyQt6 main window for VFXPlayer with compare & advanced controls."""
 
 import sys, os, json
+import numpy as np
 from typing import Optional, Tuple
 from PyQt6 import QtWidgets, QtGui, QtCore
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PyQt6.QtCore import QUrl
 from gui.vispy_viewport import VispyViewport
 from core.color_manager import ColorManager
 from gui.settings_dialog import SettingsDialog
+from core.player_core import PlaybackStrategy
 
 
 class PlayheadSlider(QtWidgets.QSlider):
@@ -113,6 +117,136 @@ from gui.vispy_viewport import VispyViewport
 # PlayerViewport class removed, using VispyViewport instead
 
 
+class FilePropertiesHUD(QtWidgets.QFrame):
+    """Semi-transparent overlay for displaying file metadata."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet("""
+            QFrame {
+                background-color: rgba(20, 20, 20, 180);
+                border: 1px solid rgba(100, 100, 100, 100);
+                border-radius: 8px;
+                color: #e0e0e0;
+                font-family: 'Segoe UI', 'Roboto', sans-serif;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+                color: #ccc;
+            }
+            .title {
+                color: #4a90e2;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            .key {
+                color: #888;
+                font-weight: bold;
+            }
+            .value {
+                color: #ddd;
+            }
+        """)
+        
+        self.layout = QtWidgets.QVBoxLayout(self)
+        self.layout.setContentsMargins(15, 15, 15, 15)
+        self.layout.setSpacing(6)
+        
+        self.title_label = QtWidgets.QLabel("File Properties")
+        self.title_label.setProperty("class", "title")
+        self.layout.addWidget(self.title_label)
+        
+        self.scroll = QtWidgets.QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet("background: transparent; border: none;")
+        self.scroll_content = QtWidgets.QWidget()
+        self.scroll_content.setStyleSheet("background: transparent;")
+        self.scroll_layout = QtWidgets.QGridLayout(self.scroll_content)
+        self.scroll_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll_layout.setSpacing(8)
+        self.scroll.setWidget(self.scroll_content)
+        self.layout.addWidget(self.scroll)
+        
+        self.setMinimumWidth(350)
+        self.setMinimumHeight(400)
+        self.hide()
+
+    def update_info(self, media_info):
+        """Update items in the grid based on MediaInfo."""
+        # Clear layout
+        while self.scroll_layout.count():
+            item = self.scroll_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        if not media_info:
+            return
+
+        row = 0
+        
+        # Helper to add rows
+        def add_row(key, value):
+            nonlocal row
+            klbl = QtWidgets.QLabel(f"{key}:")
+            klbl.setStyleSheet("color: #888; font-weight: bold;")
+            vlbl = QtWidgets.QLabel(str(value))
+            vlbl.setStyleSheet("color: #ddd;")
+            vlbl.setWordWrap(True)
+            self.scroll_layout.addWidget(klbl, row, 0)
+            self.scroll_layout.addWidget(vlbl, row, 1)
+            row += 1
+
+        # Basic Info
+        filename = os.path.basename(media_info.path)
+        add_row("File", filename)
+        add_row("Type", media_info.type.capitalize())
+        add_row("Resolution", f"{media_info.size[0]} x {media_info.size[1]}" if media_info.size[0] > 0 else "Unknown")
+        add_row("Frames", media_info.frame_count)
+        add_row("FPS", f"{media_info.fps:.3f}")
+        
+        if media_info.format:
+            add_row("Format", media_info.format)
+        if media_info.codec:
+            add_row("Codec", media_info.codec)
+            
+        # Path
+        add_row("Path", media_info.path)
+
+        # Metadata / Extra Tags
+        if media_info.metadata:
+            separator = QtWidgets.QFrame()
+            separator.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+            separator.setStyleSheet("background-color: #333;")
+            self.scroll_layout.addWidget(separator, row, 0, 1, 2)
+            row += 1
+            
+            # Sort keys for better readability
+            for k in sorted(media_info.metadata.keys()):
+                # Skip things we already showed or internal info
+                if k in ('format_long', 'codec_long'):
+                    continue
+                v = media_info.metadata[k]
+                # Truncate long strings
+                if isinstance(v, str) and len(v) > 100:
+                    v = v[:97] + "..."
+                add_row(k, v)
+        
+        self.scroll_layout.setColumnStretch(1, 1)
+        self.adjustSize()
+        # Limit max height
+        if self.height() > 500:
+            self.setFixedHeight(500)
+        else:
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(16777215)
+            self.adjustSize()
+
+
+
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, core):
@@ -177,6 +311,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wipe_mode = False
         self.side_by_side = False
         self.fullscreen = False
+        self.properties_visible = False
         self.compare_offset = 0
         self.annotations = {} # mapping frame index -> list of stroke dicts
         self.central_widget = QtWidgets.QWidget()
@@ -194,6 +329,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.viewport_layout.addWidget(self.splitter)
         
         self.main_layout.addWidget(self.viewport_container, 1)
+
+        # File Properties HUD (Overlay)
+        self.props_hud = FilePropertiesHUD(self.viewport_container)
+        self.props_hud.move(20, 20) # Top-leftish
+
 
         # HUD Container (Bottom)
         self.hud_container = QtWidgets.QFrame()
@@ -269,6 +409,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.playback_speed = 1.0
         self._elapsed_timer = None
         self._play_start_index = 0
+        self._force_fit_next_frame = False
 
         # Status bar
         self.status = QtWidgets.QStatusBar()
@@ -284,6 +425,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pending_frame_timer.setInterval(16)
         self._pending_frame_timer.timeout.connect(self._check_pending_frame)
         self._target_frame_index = -1
+
+        # Audio engine (video files only)
+        self._audio_player = None
+        self._audio_output = None
+        self._audio_muted = False
+        self._audio_volume = 1.0
+        try:
+            self._audio_player = QMediaPlayer(self)
+            self._audio_output = QAudioOutput(self)
+            self._audio_player.setAudioOutput(self._audio_output)
+            self._audio_output.setVolume(self._audio_volume)
+        except Exception:
+            self._audio_player = None
+            self._audio_output = None
 
     def _build_hud(self):
         """Construct the bottom Heads-Up Display for controls (Nuke-style)."""
@@ -558,7 +713,56 @@ class MainWindow(QtWidgets.QMainWindow):
 
         controls_layout.addSpacing(10)
 
-        controls_layout.addSpacing(10)
+        # --- Audio Controls ---
+        audio_style = """
+            QPushButton {
+                background: transparent;
+                color: #ccc;
+                font-size: 14px;
+                border: 1px solid #444;
+                border-radius: 4px;
+                padding: 2px 6px;
+            }
+            QPushButton:checked { color: #ff9800; border-color: #ff9800; }
+            QPushButton:hover { background: #333; color: white; }
+        """
+
+        self.btn_mute = QtWidgets.QPushButton("\U0001F50A")
+        self.btn_mute.setFixedSize(34, 28)
+        self.btn_mute.setCheckable(True)
+        self.btn_mute.setChecked(False)
+        self.btn_mute.setToolTip("Mute / Unmute audio (M)")
+        self.btn_mute.setStyleSheet(audio_style)
+        self.btn_mute.clicked.connect(self._toggle_mute)
+        controls_layout.addWidget(self.btn_mute)
+
+        self.volume_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(100)
+        self.volume_slider.setFixedWidth(70)
+        self.volume_slider.setToolTip("Volume")
+        self.volume_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid #444;
+                height: 3px;
+                background: #333;
+                border-radius: 1px;
+            }
+            QSlider::handle:horizontal {
+                background: #aaa;
+                border: 1px solid #666;
+                width: 10px;
+                height: 10px;
+                margin: -4px 0;
+                border-radius: 5px;
+            }
+            QSlider::handle:horizontal:hover { background: #fff; }
+            QSlider::sub-page:horizontal { background: #4a90e2; }
+        """)
+        self.volume_slider.valueChanged.connect(self._on_volume_changed)
+        controls_layout.addWidget(self.volume_slider)
+
+        controls_layout.addSpacing(6)
 
         # Bottom HUD now focuses on playback/timeline.
         # Exposure and Gamma have moved to the top bar.
@@ -807,6 +1011,28 @@ class MainWindow(QtWidgets.QMainWindow):
         fs_action.setShortcut("F11")
         fs_action.triggered.connect(lambda: self._toggle_fullscreen(fs_action.isChecked()))
         view_menu.addAction(fs_action)
+
+        view_menu.addSeparator()
+
+        view_menu.addSeparator()
+
+        strategy_menu = view_menu.addMenu("Playback Strategy")
+        self.strategy_group = QtGui.QActionGroup(self)
+        
+        strategies = [
+            ("Performance (Full Cache)", PlaybackStrategy.PERFORMANCE),
+            ("Progressive (Sequential)", PlaybackStrategy.PROGRESSIVE),
+            ("Stream Only (No RAM Cache)", PlaybackStrategy.STREAM),
+            ("Read-behind Buffer", PlaybackStrategy.READ_BEHIND)
+        ]
+        
+        for label, strat in strategies:
+            act = QtGui.QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(self.core.strategy == strat)
+            act.triggered.connect(lambda checked, s=strat: self._set_playback_strategy(s))
+            strategy_menu.addAction(act)
+            self.strategy_group.addAction(act)
 
         # Playback Menu
         play_menu = self.menuBar().addMenu("Playback")
@@ -1200,25 +1426,52 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------- Preferences ----------
     def _load_prefs(self):
         try:
+            if not os.path.exists(_PREFS_PATH):
+                return
             with open(_PREFS_PATH, 'r', encoding='utf-8') as f:
                 self.prefs = json.load(f)
             
-            # Map legacy/flat keys to self.prefs if needed (or just use them)
-            # We continue to use attributes for some runtime state
             self._prefs_input_cs = self.prefs.get('ocio_input')
             self._prefs_output_cs = self.prefs.get('ocio_output')
-            self._prefs_ocio_enabled = self.prefs.get('ocio_enabled', True)
+            
+            # Application state from prefs
             self.exposure = float(self.prefs.get('exposure', 0.0))
             self.gamma = float(self.prefs.get('gamma', 1.0))
             self.compare_offset = int(self.prefs.get('compare_offset', 0))
-            
-            # Apply cache settings if present
+
+            # Audio state from prefs
+            self._audio_volume = float(self.prefs.get('audio_volume', 1.0))
+            self._audio_muted = bool(self.prefs.get('audio_muted', False))
+            if hasattr(self, '_audio_output') and self._audio_output:
+                self._audio_output.setVolume(self._audio_volume)
+                self._audio_output.setMuted(self._audio_muted)
+            if hasattr(self, 'volume_slider'):
+                self.volume_slider.blockSignals(True)
+                self.volume_slider.setValue(int(self._audio_volume * 100))
+                self.volume_slider.blockSignals(False)
+            if hasattr(self, 'btn_mute'):
+                self.btn_mute.blockSignals(True)
+                self.btn_mute.setChecked(self._audio_muted)
+                self.btn_mute.setText("\U0001F507" if self._audio_muted else "\U0001F50A")
+                self.btn_mute.blockSignals(False)
+
+            # Loader Strategy
+            strat_val = self.prefs.get('playback_strategy', 'performance')
+            try:
+                self.core.set_strategy(PlaybackStrategy(strat_val))
+            except Exception:
+                self.core.set_strategy(PlaybackStrategy.PERFORMANCE)
+
+            # Cache settings
             if 'cache_gb' in self.prefs:
                 self.core.set_cache_gb(float(self.prefs['cache_gb']))
-            if 'cache_enabled' in self.prefs:
-                self.core.cache_enabled = self.prefs['cache_enabled']
-            if 'preload_cache' in self.prefs:
-                self.core.prefetch_enabled = self.prefs['preload_cache']
+            
+            self.core.cache_enabled = self.prefs.get('cache_enabled', True)
+            self.core.prefetch_enabled = self.prefs.get('preload_cache', True)
+            
+            if hasattr(self, 'frame_slider'):
+                self.frame_slider.set_show_cached(self.prefs.get('show_cached_timeline', True))
+                
         except Exception:
             self.prefs = {}
 
@@ -1231,11 +1484,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.prefs['exposure'] = self.exposure
             self.prefs['gamma'] = self.gamma
             self.prefs['compare_offset'] = getattr(self, 'compare_offset', 0)
+            self.prefs['playback_strategy'] = self.core.strategy.value
             self.prefs['cache_gb'] = self.core.cache_gb
             self.prefs['cache_enabled'] = self.core.cache_enabled
             self.prefs['preload_cache'] = self.core.prefetch_enabled
             self.prefs['show_cached_timeline'] = self.prefs.get('show_cached_timeline', True)
-            
+            self.prefs['audio_volume'] = getattr(self, '_audio_volume', 1.0)
+            self.prefs['audio_muted'] = getattr(self, '_audio_muted', False)
+
             with open(_PREFS_PATH, 'w', encoding='utf-8') as f:
                 json.dump(self.prefs, f, indent=2)
         except Exception:
@@ -1267,16 +1523,33 @@ class MainWindow(QtWidgets.QMainWindow):
             self.core.prefetch_enabled = self.prefs.get('preload_cache', True)
             if hasattr(self, 'core_b') and self.core_b:
                 self.core_b.prefetch_enabled = self.core.prefetch_enabled
+                
+            # 4. Playback Strategy
+            strat_val = self.prefs.get('playback_strategy', 'performance')
+            try:
+                self._set_playback_strategy(PlaybackStrategy(strat_val))
+            except Exception:
+                pass
             
-            # 4. Show cached in timeline
+            # 5. OCIO Config path override
+            new_ocio = self.prefs.get('ocio_config', "")
+            if new_ocio and new_ocio != getattr(self, '_last_applied_ocio', ""):
+                # Placeholder for actual OCIO config application logic
+                pass # This line is added to ensure syntactical correctness
+            
+            # 6. Show cached in timeline
             self.frame_slider.set_show_cached(self.prefs.get('show_cached_timeline', True))
             
-            # 5. Defaults (applied on next load)
+            # 7. Defaults (applied on next load)
             
             self._save_prefs()
 
     # ---------- Core Actions ----------
     def load_media(self, path: str):
+        # Reset Gain/Gamma to defaults on each new load
+        self._reset_exposure()
+        self._reset_gamma()
+        
         try:
             self.core.load(path)
         except Exception as e:
@@ -1288,10 +1561,7 @@ class MainWindow(QtWidgets.QMainWindow):
             fps = self.core.media_fps() or 24.0
             self.fps_edit.setText(f"{fps:.2f}")
             self.fps_edit.setDisabled(True)
-            # Videos generally shouldn't prefetch frames
-            self.core.prefetch_enabled = False
-        else:
-            self.fps_edit.setDisabled(False)
+            # Videos use source FPS; prefetch stays enabled to allow read-ahead/pruning
             self.core.prefetch_enabled = True
             
         # Apply OCIO Defaults based on type
@@ -1324,6 +1594,9 @@ class MainWindow(QtWidgets.QMainWindow):
                          self.viewer_combo.setCurrentIndex(idx)
                          self.viewer_combo.blockSignals(False)
 
+        # Apply cache settings immediately based on prefs
+        self.core.set_cache_gb(self.prefs.get('cache_gb', 4.0))
+
         # Sync OCIO params to background loader
         self._sync_ocio_to_loader()
         
@@ -1347,7 +1620,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._status_base = f"Loaded: {path}"
         self._update_status(self._status_base)
         self._update_timer_interval()
-        
+
+        # Update HUD if visible or load it for later
+        if self.core.media:
+            self.props_hud.update_info(self.core.media)
+
+        # Audio: attach source for video files
+        self._audio_attach(path)
+
         # Auto-play on load as requested
         self.play()
 
@@ -1367,11 +1647,31 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._pending_frame_timer.stop()
                 self._target_frame_index = -1
 
-        # Process frame through color pipeline (NumPy CPU)
-        frame = self.color_manager.process(frame_raw, self.exposure, self.gamma, self.channel_mode)
+        # Force fit if requested (e.g. after fullscreen)
+        if getattr(self, '_force_fit_next_frame', False):
+            self.viewport.fit_to_window()
+            if self.side_by_side and hasattr(self, 'viewport_b'):
+                self.viewport_b.fit_to_window()
+            self._force_fit_next_frame = False
 
-        # Display frame
-        self.viewport.set_frame(frame)
+        # Apply Gain, Gamma, OCIO and Channel Isolation via ColorManager (CPU)
+        # Fast path: bypass CPU array allocations for standard videos at default grading
+        if frame_raw is not None and frame_raw.dtype == np.uint8 and self.exposure == 0.0 and self.gamma == 1.0 and self.channel_mode == 'RGB':
+            frame_ready = frame_raw
+        else:
+            frame_ready = self.color_manager.process(frame_raw, self.exposure, self.gamma, self.channel_mode)
+            
+            # Convert back to uint8 for Vispy stability
+            if frame_ready is not None and frame_ready.dtype == np.float32:
+                frame_ready = (np.clip(frame_ready, 0, 1) * 255).astype(np.uint8)
+            
+        self.viewport.set_frame(frame_ready)
+        
+        # Ensure GPU adjustments are neutral since we're processing on CPU
+        self.viewport.set_exposure(0.0)
+        self.viewport.set_gamma(1.0)
+        self.viewport.set_channel_mode('RGB')
+        
         self.frame_slider.blockSignals(True)
         self.frame_slider.setValue(index)
         self.frame_slider.blockSignals(False)
@@ -1387,20 +1687,38 @@ class MainWindow(QtWidgets.QMainWindow):
             cframe_raw = self.core_b.get_frame(idx_b)
             
             if cframe_raw is not None:
-                cframe = self.color_manager.process(cframe_raw, self.exposure, self.gamma, self.channel_mode)
-            else:
-                cframe = None
-            
-            if self.side_by_side:
-                self.viewport_b.show()
-                if cframe is not None:
-                    self.viewport_b.set_frame(cframe)
-                if self.btn_draw.isChecked():
-                    self.viewport_b.set_annotations(strokes)
-            elif self.wipe_mode:
-                self.viewport_b.hide()
-                if cframe is not None:
+                if self.side_by_side:
+                    if cframe_raw is not None and cframe_raw.dtype == np.uint8 and self.exposure == 0.0 and self.gamma == 1.0 and self.channel_mode == 'RGB':
+                        cframe_ready = cframe_raw
+                    else:
+                        cframe_ready = self.color_manager.process(cframe_raw, self.exposure, self.gamma, self.channel_mode)
+                        if cframe_ready is not None and cframe_ready.dtype == np.float32:
+                            cframe_ready = (np.clip(cframe_ready, 0, 1) * 255).astype(np.uint8)
+                        
+                    self.viewport_b.set_frame(cframe_ready)
+                    
+                    # Reset GPU on viewport_b
+                    self.viewport_b.set_exposure(0.0)
+                    self.viewport_b.set_gamma(1.0)
+                    self.viewport_b.set_channel_mode('RGB')
+                    
+                    self.viewport_b.show()
+                elif self.wipe_mode:
+                    self.viewport_b.hide()
+                    # Wipe is CPU-side, but bypass heavy ColorManager if possible
+                    if frame_raw is not None and frame_raw.dtype == np.uint8 and self.exposure == 0.0 and self.gamma == 1.0 and self.channel_mode == 'RGB':
+                        frame = frame_raw
+                    else:
+                        frame = self.color_manager.process(frame_raw, self.exposure, self.gamma, self.channel_mode)
+                    
+                    if cframe_raw is not None and cframe_raw.dtype == np.uint8 and self.exposure == 0.0 and self.gamma == 1.0 and self.channel_mode == 'RGB':
+                        cframe = cframe_raw
+                    else:
+                        cframe = self.color_manager.process(cframe_raw, self.exposure, self.gamma, self.channel_mode)
+                        
                     self.viewport.composite_wipe(frame, cframe, self.wipe_slider.value()/1000.0)
+            if self.btn_draw.isChecked() and self.side_by_side:
+                self.viewport_b.set_annotations(strokes)
 
 
     def _check_pending_frame(self):
@@ -1422,73 +1740,77 @@ class MainWindow(QtWidgets.QMainWindow):
         # Validate
         r_in = max(0, min(cnt-1, r_in))
         r_out = max(r_in, min(cnt-1, r_out))
-        
+
         # Advance logic - unified elapsed-time approach for all media types
         if self._elapsed_timer is None:
             self._elapsed_timer = QtCore.QElapsedTimer()
             self._elapsed_timer.start()
-        
+
         fps = (self.core.media_fps() or 24.0) * self.playback_speed
         ms = self._elapsed_timer.elapsed()
         frames = int(ms * fps / 1000.0)
         next_idx = self._play_start_index + frames
-            
+
         # Check against Range Out
         if next_idx > r_out:
             if self.loop:
                 next_idx = r_in
                 self._elapsed_timer.restart()
                 self._play_start_index = r_in
+                # Loop audio if applicable
+                if self._audio_player and self._audio_player.source().isValid():
+                    pos_ms = int(r_in * 1000.0 / fps)
+                    self._audio_player.setPosition(pos_ms)
             else:
                 next_idx = r_out
                 self.pause()
-                return # Stop advancement
-        
+                return  # Stop advancement
+
         # Don't re-display the same frame
         if next_idx == self.current_index:
             return
-                
-        # --- Drop-frame tolerance ---
-        # If the target frame isn't cached, try the next sequential frame.
-        # This prevents stalling during playback on cache misses.
+
+        # --- Drop-frame strategy (MPC-style) ---
+        # If the target frame isn't ready, we DO NOT jump sideways to find another 
+        # (which caused original strobing), and we DO NOT reset the clock (which caused stuttering).
+        # We simply drop the frame and wait for the next tick, leaving the clock running in real-time.
         frame_raw = self.core.get_frame(next_idx)
         if frame_raw is None:
-            # Skip up to 3 frames looking for a cached one
-            for skip in range(1, 4):
-                alt = next_idx + skip
-                if alt > r_out:
-                    break
-                frame_raw = self.core.get_frame(alt)
-                if frame_raw is not None:
-                    next_idx = alt
-                    break
-            if frame_raw is None:
-                return  # No cached frame available, wait for next tick
+            return
 
-        self.seek(next_idx)
+        self.seek(next_idx, update_audio=False)
 
 
-    def seek(self, index: int):
+    def seek(self, index: int, update_audio=True):
         idx = int(index)
         if 0 <= idx < self.core.frame_count():
             self._show_frame(idx)
+            # Sync audio position for video files
+            if update_audio and self._audio_player and self._audio_player.source().isValid():
+                fps = self.core.media_fps() or 24.0
+                pos_ms = int(idx * 1000.0 / fps)
+                self._audio_player.setPosition(pos_ms)
 
     def play(self):
         if self.playing:
             return
         self.playing = True
-        
+
         # Unified elapsed-time playback for all media types
         self._elapsed_timer = QtCore.QElapsedTimer()
         self._elapsed_timer.start()
         self._play_start_index = self.current_index
-        
+
         # 8ms heartbeat (~125fps cap) for smooth frame sync
         self.timer.start(8)
-        
+
         # Aggressive prefetch burst: load next 48 frames immediately
         self.core.burst_prefetch(self.current_index, count=48)
-        
+
+        # Audio
+        if self._audio_player and self._audio_player.source().isValid():
+            self._audio_player.play()
+
         # Update UI
         if hasattr(self, 'btn_play'):
             self.btn_play.blockSignals(True)
@@ -1505,7 +1827,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.playing = False
         self.timer.stop()
         self._elapsed_timer = None
-        
+
+        # Audio
+        if self._audio_player:
+            self._audio_player.pause()
+
         # Update UI
         if hasattr(self, 'btn_play'):
             self.btn_play.blockSignals(True)
@@ -1516,11 +1842,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._status_base = "Paused"
         self._update_status(self._status_base)
 
-
     def stop(self):
         self.pause()
         self.seek(0)
         self._elapsed_timer = None
+        if self._audio_player:
+            self._audio_player.stop()
         self._status_base = "Stopped"
         self._update_status(self._status_base)
 
@@ -1543,17 +1870,117 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.playing:
             self.timer.start(self._interval_ms())
 
+    # ---------- Audio helpers ----------
+    def _audio_attach(self, path: str):
+        """Attach audio source when a video file is loaded. No-op for image sequences."""
+        if not self._audio_player:
+            return
+            
+        try:
+            self._audio_player.mediaStatusChanged.disconnect()
+        except TypeError:
+            pass
+            
+        ext = os.path.splitext(path)[1].lower()
+        video_exts = {'.mov', '.mp4', '.avi', '.mkv', '.mxf', '.webm'}
+        
+        if ext in video_exts:
+            self._audio_player.setSource(QUrl.fromLocalFile(os.path.abspath(path)))
+            
+            def _on_media_status(status):
+                if status == QMediaPlayer.MediaStatus.LoadedMedia:
+                    has_audio = self._audio_player.hasAudio()
+                    if hasattr(self, 'btn_mute'):
+                        self.btn_mute.setEnabled(has_audio)
+                    if hasattr(self, 'volume_slider'):
+                        self.volume_slider.setEnabled(has_audio)
+                        
+                    if has_audio:
+                        if hasattr(self, 'btn_mute'):
+                            self.btn_mute.setStyleSheet("""
+                                QPushButton {
+                                    background: transparent;
+                                    color: #ccc;
+                                    font-size: 14px;
+                                    border: 1px solid #444;
+                                    border-radius: 4px;
+                                    padding: 2px 6px;
+                                }
+                                QPushButton:checked { color: #ff9800; border-color: #ff9800; }
+                                QPushButton:hover { background: #333; color: white; }
+                            """)
+                        if hasattr(self, 'volume_slider'):
+                            self.volume_slider.setStyleSheet("""
+                                QSlider::groove:horizontal { border: 1px solid #444; height: 3px; background: #333; border-radius: 1px; }
+                                QSlider::handle:horizontal { background: #aaa; border: 1px solid #666; width: 10px; height: 10px; margin: -4px 0; border-radius: 5px; }
+                                QSlider::handle:horizontal:hover { background: #fff; }
+                                QSlider::sub-page:horizontal { background: #4a90e2; }
+                            """)
+                        if self._audio_output:
+                            self._audio_output.setVolume(self._audio_volume)
+                            self._audio_output.setMuted(self._audio_muted)
+                    else:
+                        if hasattr(self, 'btn_mute'):
+                            self.btn_mute.setStyleSheet("QPushButton { color: #555; background: transparent; border: 1px solid #333; }")
+                        if hasattr(self, 'volume_slider'):
+                            self.volume_slider.setStyleSheet("""
+                                QSlider::groove:horizontal { border: 1px solid #333; height: 3px; background: #222; }
+                                QSlider::handle:horizontal { background: #444; border: 1px solid #333; width: 10px; height: 10px; margin: -4px 0; border-radius: 5px; }
+                                QSlider::sub-page:horizontal { background: #555; }
+                            """)
+            
+            self._audio_player.mediaStatusChanged.connect(_on_media_status)
+        else:
+            # Image sequence — clear audio source
+            self._audio_player.setSource(QUrl())
+            if hasattr(self, 'btn_mute'):
+                self.btn_mute.setEnabled(False)
+                self.btn_mute.setStyleSheet("QPushButton { color: #555; background: transparent; border: 1px solid #333; }")
+            if hasattr(self, 'volume_slider'):
+                self.volume_slider.setEnabled(False)
+                self.volume_slider.setStyleSheet("""
+                    QSlider::groove:horizontal { border: 1px solid #333; height: 3px; background: #222; }
+                    QSlider::handle:horizontal { background: #444; border: 1px solid #333; width: 10px; height: 10px; margin: -4px 0; border-radius: 5px; }
+                    QSlider::sub-page:horizontal { background: #555; }
+                """)
+
+    def _toggle_mute(self, checked: bool = None):
+        """Toggle audio mute. Can be called from button or M hotkey."""
+        if checked is None:
+            self._audio_muted = not self._audio_muted
+        else:
+            self._audio_muted = bool(checked)
+        if self._audio_output:
+            self._audio_output.setMuted(self._audio_muted)
+        # Update button state
+        if hasattr(self, 'btn_mute'):
+            self.btn_mute.blockSignals(True)
+            self.btn_mute.setChecked(self._audio_muted)
+            self.btn_mute.setText("\U0001F507" if self._audio_muted else "\U0001F50A")
+            self.btn_mute.blockSignals(False)
+        self._save_prefs()
+
+    def _on_volume_changed(self, val: int):
+        """Volume slider moved (0-100)."""
+        self._audio_volume = val / 100.0
+        if self._audio_output:
+            self._audio_output.setVolume(self._audio_volume)
+            # Un-mute automatically when user drags the slider
+            if val > 0 and self._audio_muted:
+                self._toggle_mute(False)
+        self._save_prefs()
+
     def _on_speed_changed(self, speed: float):
         self.playback_speed = speed
         if hasattr(self, 'speed_btn'):
             self.speed_btn.setText(f"{speed}x")
-        
-        # If playing, we need to reset the elapsed timer and start index 
+
+        # If playing, we need to reset the elapsed timer and start index
         # so the speed change feels seamless and doesn't jump.
         if self.playing:
             self._elapsed_timer.restart()
             self._play_start_index = self.current_index
-            
+
         self._refresh_status_metrics()
 
     def _update_status(self, msg: str):
@@ -1710,11 +2137,11 @@ class MainWindow(QtWidgets.QMainWindow):
             top_raw = self.core_b.get_frame(idx_b)
             
             if base_raw is not None:
-                base = self.color_manager.process(base_raw, self.exposure, self.gamma)
+                base = self.color_manager.process(base_raw, self.exposure, self.gamma, self.channel_mode)
             else:
                 base = None
             if top_raw is not None:
-                top = self.color_manager.process(top_raw, self.exposure, self.gamma)
+                top = self.color_manager.process(top_raw, self.exposure, self.gamma, self.channel_mode)
             else:
                 top = None
             
@@ -1798,8 +2225,11 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------- Keyboard Shortcuts ----------
     def keyPressEvent(self, event: QtGui.QKeyEvent):  # type: ignore[override]
         key = event.key()
-        if key == QtCore.Qt.Key.Key_Escape and self.isFullScreen():
-            self._toggle_fullscreen(False)
+        if key == QtCore.Qt.Key.Key_Escape:
+            if self.isFullScreen():
+                self._toggle_fullscreen(False)
+            event.accept()
+            return
         elif key == QtCore.Qt.Key.Key_Space:
             self.pause() if self.playing else self.play()
         elif key == QtCore.Qt.Key.Key_C:
@@ -1824,6 +2254,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._set_compare_mode('single')
             else:
                 self._set_compare_mode('wipe')
+        elif key == QtCore.Qt.Key.Key_I:
+            # Toggle File Properties HUD
+            self.properties_visible = not self.properties_visible
+            if self.properties_visible:
+                if self.core.media:
+                    self.props_hud.update_info(self.core.media)
+                self.props_hud.show()
+                self.props_hud.raise_()
+            else:
+                self.props_hud.hide()
+        elif key == QtCore.Qt.Key.Key_E:
+            # Cycle Playback Strategy
+            current = self.core.strategy
+            all_strats = list(PlaybackStrategy)
+            idx = all_strats.index(current)
+            next_strat = all_strats[(idx + 1) % len(all_strats)]
+            self._set_playback_strategy(next_strat)
+        elif key == QtCore.Qt.Key.Key_M:
+            self._toggle_mute()
         elif key == QtCore.Qt.Key.Key_O and hasattr(self, 'ocio_enable_btn'):
             self.ocio_enable_btn.toggle()
         elif key == QtCore.Qt.Key.Key_Right:
@@ -1932,6 +2381,45 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.hud_container.show()
             if state.get('wipe_visible', False) and hasattr(self, '_wipe_row'):
                 self._wipe_row.show()
+            
+            # Restore viewport visualization after window resize
+            # We use a short delay (50ms) to ensure OS window transitions and layout are stable.
+            def _refresh():
+                # Force layout engine to update
+                self.centralWidget().updateGeometry()
+                if self.centralWidget().layout():
+                    self.centralWidget().layout().activate()
+                
+                # Re-push frame & reset camera
+                self._force_fit_next_frame = True
+                self._show_frame(self.current_index)
+                self.viewport.fit_to_window()
+                self.viewport.canvas.update()
+                
+                if self.side_by_side and hasattr(self, 'viewport_b') and self.viewport_b:
+                    self.viewport_b.fit_to_window()
+                    self.viewport_b.canvas.update()
+            
+            QtCore.QTimer.singleShot(50, _refresh)
+
+    def _set_playback_strategy(self, strategy: PlaybackStrategy):
+        self.core.set_strategy(strategy)
+        if hasattr(self, 'core_b') and self.core_b:
+            self.core_b.set_strategy(strategy)
+        
+        # Update UI checks
+        for action in self.strategy_group.actions():
+            if "Performance" in action.text() and strategy == PlaybackStrategy.PERFORMANCE: action.setChecked(True)
+            elif "Progressive" in action.text() and strategy == PlaybackStrategy.PROGRESSIVE: action.setChecked(True)
+            elif "Stream" in action.text() and strategy == PlaybackStrategy.STREAM: action.setChecked(True)
+            elif "Read-behind" in action.text() and strategy == PlaybackStrategy.READ_BEHIND: action.setChecked(True)
+            
+        self._save_prefs()
+        self._update_status(f"Strategy: {strategy.name}")
+
+    def _toggle_economy_mode(self, checked):
+        # Legacy support for old settings/buttons
+        self._set_playback_strategy(PlaybackStrategy.STREAM if checked else PlaybackStrategy.PERFORMANCE)
 
     def closeEvent(self, event):
         self._save_prefs()

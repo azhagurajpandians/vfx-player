@@ -20,8 +20,15 @@ import queue
 import collections
 import numpy as np
 import traceback
+import enum
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Any
+
+class PlaybackStrategy(enum.Enum):
+    PERFORMANCE = "performance"  # Full aggressive caching
+    PROGRESSIVE = "progressive"  # Sequential foreground lead
+    STREAM = "stream"           # Zero RAM caching, direct pipe
+    READ_BEHIND = "readbehind"  # Performance + keep N frames behind
 
 @dataclass
 class MediaInfo:
@@ -30,6 +37,13 @@ class MediaInfo:
     frame_count: int
     size: Tuple[int, int]
     fps: float
+    format: str = ""
+    codec: str = ""
+    metadata: Dict[str, Any] = None
+
+    def __post_init__(self):
+        if self.metadata is None:
+            self.metadata = {}
 
 
 # ---------------------------------------------------------------------------
@@ -113,8 +127,8 @@ def probe_video(path: str) -> dict:
         cmd = [
             ffprobe, '-v', 'quiet',
             '-select_streams', 'v:0',
-            '-show_entries', 'stream=width,height,r_frame_rate,nb_frames,duration',
-            '-show_entries', 'format=duration',
+            '-show_entries', 'stream=width,height,r_frame_rate,nb_frames,duration,codec_name,codec_long_name',
+            '-show_entries', 'format=duration,format_name,format_long_name',
             '-of', 'csv=p=0',
             path
         ]
@@ -126,7 +140,7 @@ def probe_video(path: str) -> dict:
         lines = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
         info = {}
         if lines:
-            # First line: stream info: width,height,r_frame_rate,nb_frames,duration
+            # First line: stream info: width,height,r_frame_rate,nb_frames,duration,codec_name,codec_long_name
             parts = lines[0].split(',')
             if len(parts) >= 3:
                 info['width'] = int(parts[0]) if parts[0] else 1920
@@ -145,13 +159,25 @@ def probe_video(path: str) -> dict:
                 # stream duration
                 if len(parts) >= 5 and parts[4] and parts[4] != 'N/A':
                     info['duration'] = float(parts[4])
+                
+                # codec
+                if len(parts) >= 6 and parts[5]:
+                    info['codec'] = parts[5]
+                if len(parts) >= 7 and parts[6]:
+                    info['codec_long'] = parts[6]
 
-            # Second line might be format duration
-            if len(lines) > 1 and 'duration' not in info:
-                try:
-                    info['duration'] = float(lines[1])
-                except (ValueError, IndexError):
-                    pass
+            # Second line might be format info: duration,format_name,format_long_name
+            if len(lines) > 1:
+                fparts = lines[1].split(',')
+                if 'duration' not in info and fparts[0]:
+                    try:
+                        info['duration'] = float(fparts[0])
+                    except (ValueError, IndexError):
+                        pass
+                if len(fparts) >= 2 and fparts[1]:
+                    info['format'] = fparts[1]
+                if len(fparts) >= 3 and fparts[2]:
+                    info['format_long'] = fparts[2]
 
         # Estimate frame count from duration if not available
         if 'frame_count' not in info and 'duration' in info and 'fps' in info:
@@ -180,7 +206,7 @@ class FFmpegReader:
         if not self._ffmpeg:
             return False
 
-        cmd = [self._ffmpeg, '-hide_banner', '-loglevel', 'error']
+        cmd = [self._ffmpeg, '-hide_banner', '-loglevel', 'error', '-hwaccel', 'auto']
 
         # Seek to start_frame if not 0
         if start_frame > 0:
@@ -194,13 +220,16 @@ class FFmpegReader:
             '-v', 'error',
             '-'
         ])
+        
+        # Optimize for faster throughput
+        bufsize = self.frame_size * 8  # 8 frames buffer
 
         try:
             self._proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                bufsize=self.frame_size * 4,
+                bufsize=bufsize,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             )
             self._current_frame = start_frame
@@ -209,14 +238,14 @@ class FFmpegReader:
             traceback.print_exc()
             return False
 
-    def read_frame(self, target_index: int, fps: float = 24.0):
+    def read_frame(self, target_index: int, fps: float = 24.0, seek: bool = False):
         """Read frame at target_index. Returns RGB uint8 numpy array or None."""
         if self._proc is None or self._proc.poll() is not None:
             if not self._start_process(target_index, fps):
                 return None
 
-        # If target is behind current position or too far ahead, seek
-        if target_index < self._current_frame or target_index > self._current_frame + 100:
+        # If target is behind current position or too far ahead, seek (unless forced seek)
+        if seek or target_index < self._current_frame or target_index > self._current_frame + 200:
             if not self._start_process(target_index, fps):
                 return None
 
@@ -263,9 +292,12 @@ class FrameLoader:
         self.stopping = False
         self.cache_ref = cache_ref
         self.cache_lock = cache_lock
+        self.cache_capacity = 500  # Default, synced from PlayerCore
         self.seq_workers_count = seq_workers
         self._threads = []
         self.session_id = 0
+        self.strategy = PlaybackStrategy.PERFORMANCE
+        self.read_behind_count = 12
 
         # OCIO params for background processing
         self.ocio_enabled = False
@@ -296,6 +328,11 @@ class FrameLoader:
     def request(self, path: str, index: int, priority: int):
         if self.stopping:
             return
+        
+        # Check if already in cache (quick check without lock first)
+        if index in self.cache_ref:
+            return
+
         item = (priority, time.time(), index, path)
         if self._is_video(path):
             self._vid_queue.put(item)
@@ -386,6 +423,9 @@ class FrameLoader:
 
                 with self.cache_lock:
                     if index in self.cache_ref:
+                        # Synchronize next_seq_frame even if we skip
+                        if index >= _next_seq_frame:
+                            _next_seq_frame = index + 1
                         continue
 
                 # Open video source if needed
@@ -423,44 +463,80 @@ class FrameLoader:
                             continue
 
                 # --- Sequential read-ahead strategy ---
-                # Only seek if the requested frame is NOT the next sequential frame
+                # Only seek if it's a backwards jump or a significant forward jump
+                # (Reading sequential through the pipe is faster than re-starting FFmpeg)
                 need_seek = (_next_seq_frame != index)
-
+                if not need_seek:
+                    pass # Already where we need to be
+                elif index > _next_seq_frame and index < _next_seq_frame + 24:
+                    # Minor forward jump? Just read-skip to keep the pipe alive
+                    need_seek = False
+                
                 frame = None
                 if _use_ffmpeg and _ffmpeg_reader:
-                    raw = _ffmpeg_reader.read_frame(index, _media_fps)
+                    raw = _ffmpeg_reader.read_frame(index, _media_fps, seek=need_seek)
                     if raw is not None:
-                        frame = raw.astype(np.float32) * _inv255
+                        # Keep as uint8 to save 4x bandwidth and memory
+                        # GPU handles normalization [0, 255] -> [0, 1]
+                        frame = raw
                     _next_seq_frame = index + 1
                 elif _cap is not None and _cap.isOpened():
                     if need_seek:
                         _cap.set(cv2.CAP_PROP_POS_FRAMES, index)
                     ret, bgr = _cap.read()
                     if ret:
-                        frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) * _inv255
+                        # Keep as uint8 (BGR -> RGB)
+                        frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                     _next_seq_frame = index + 1
 
                 if frame is not None:
+                    # Cache the frame. Strategy handling is now in PlayerCore.get_frame
+                    # and cache pruning logic.
                     with self.cache_lock:
                         if index not in self.cache_ref:
                             self.cache_ref[index] = frame
+                    
+                    _next_seq_frame = index + 1
 
-                    # --- Read-ahead burst: fill cache with next N frames sequentially ---
-                    if not _use_ffmpeg and _cap is not None and _cap.isOpened():
-                        for ahead in range(_next_seq_frame, _next_seq_frame + 8):
+                    # --- Read-ahead burst ---
+                    # Only prefetch if NOT in STREAM mode
+                    if self.strategy != PlaybackStrategy.STREAM:
+                        for ahead in range(_next_seq_frame, _next_seq_frame + 16): 
                             if self.session_id != _local_session or self.stopping:
                                 break
                             with self.cache_lock:
                                 if ahead in self.cache_ref:
+                                    _next_seq_frame = ahead + 1
                                     continue
-                            ret, bgr = _cap.read()
-                            if not ret:
-                                break
-                            fr = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) * _inv255
-                            with self.cache_lock:
-                                if ahead not in self.cache_ref:
+                            
+                            if _use_ffmpeg and _ffmpeg_reader:
+                                # Sequential read (no seek)
+                                raw = _ffmpeg_reader.read_frame(ahead, _media_fps, seek=False)
+                                if raw is not None:
+                                    # Always keep as uint8 for video burst
+                                    fr = raw
+                                        
+                                    with self.cache_lock:
+                                        self.cache_ref[ahead] = fr
+                                        # Enforce capacity in worker
+                                        while len(self.cache_ref) > self.cache_capacity:
+                                            self.cache_ref.popitem(last=False)
+                                    _next_seq_frame = ahead + 1
+                                else:
+                                    break
+                            elif _cap is not None and _cap.isOpened():
+                                ret, bgr = _cap.read()
+                                if not ret:
+                                    break
+                                # Keep as uint8
+                                fr = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                                    
+                                with self.cache_lock:
                                     self.cache_ref[ahead] = fr
-                            _next_seq_frame = ahead + 1
+                                    # Enforce capacity
+                                    while len(self.cache_ref) > self.cache_capacity:
+                                        self.cache_ref.popitem(last=False)
+                                _next_seq_frame = ahead + 1
 
             except queue.Empty:
                 continue
@@ -490,6 +566,9 @@ class FrameLoader:
                     with self.cache_lock:
                         if index not in self.cache_ref:
                             self.cache_ref[index] = frame
+                            # Enforce capacity in worker
+                            while len(self.cache_ref) > self.cache_capacity:
+                                self.cache_ref.popitem(last=False)
 
             except queue.Empty:
                 continue
@@ -552,6 +631,8 @@ class PlayerCore:
         self.prefetch_enabled = prefetch_enabled
         self.cache_enabled = True  # Toggle for enable/disable cache
         self.cache_gb = 4.0  # Default 4 GB memory budget
+        self.strategy = PlaybackStrategy.PERFORMANCE
+        self.read_behind_count = 12
         self._frame_mem_bytes = 0  # Auto-set when first frame is cached
         self.media: Optional[MediaInfo] = None
 
@@ -569,6 +650,42 @@ class PlayerCore:
         self.current_frame = 0
         if self.sequence:
             self.media = MediaInfo(path=folder_path, type='sequence', frame_count=len(self.sequence), size=(0,0), fps=24.0)
+            self._extract_sequence_metadata()
+
+    def _extract_sequence_metadata(self):
+        """Extract resolution and metadata from the first frame of a sequence."""
+        if not self.sequence or not self.loader._oiio_loaded:
+            return
+        
+        try:
+            import OpenImageIO as oiio
+            first_frame = self.sequence[0]
+            inp = oiio.ImageInput.open(first_frame)
+            if inp:
+                spec = inp.spec()
+                self.media.size = (spec.width, spec.height)
+                self.media.format = inp.format_name()
+                
+                # Pre-calculate frame memory size (RGB float32)
+                self._frame_mem_bytes = spec.width * spec.height * 3 * 4
+                self._recalc_capacity_from_gb()
+                
+                # Extract compression (codec)
+                compression = spec.get_string_attribute("compression")
+                if compression:
+                    self.media.codec = compression
+                
+                # Extract extra metadata
+                for i in range(len(spec.extra_attribs)):
+                    attr = spec.extra_attribs[i]
+                    if attr.type.basetype == oiio.BASETYPE.STRING:
+                         self.media.metadata[attr.name] = spec.get_string_attribute(attr.name)
+                    elif attr.type.basetype in (oiio.BASETYPE.INT, oiio.BASETYPE.FLOAT):
+                         self.media.metadata[attr.name] = spec.get_float_attribute(attr.name)
+                         
+                inp.close()
+        except Exception:
+            traceback.print_exc()
 
     def load(self, path: str):
         with self.cache_lock:
@@ -582,12 +699,14 @@ class PlayerCore:
                 if not self.sequence:
                     self.sequence = [path]
                 self.media = MediaInfo(path=folder, type='sequence', frame_count=len(self.sequence), size=(0,0), fps=24.0)
+                self._extract_sequence_metadata()
             else:
                 import cv2
                 self.sequence = [path]
                 fc, fps, w, h = 100, 24.0, 1920, 1080
 
                 # Try cv2 for metadata first
+                info = {}
                 try:
                     cap = cv2.VideoCapture(path)
                     if cap.isOpened():
@@ -615,6 +734,17 @@ class PlayerCore:
                         fc = info.get('frame_count', 100)
 
                 self.media = MediaInfo(path=path, type='video', frame_count=fc, size=(w,h), fps=fps)
+                if info:
+                    self.media.format = info.get('format', '')
+                    self.media.codec = info.get('codec', '')
+                    # Store long names as well if available
+                    if 'format_long' in info: self.media.metadata['format_long'] = info['format_long']
+                    if 'codec_long' in info: self.media.metadata['codec_long'] = info['codec_long']
+                
+                # Pre-compute frame size for GB-based cache capacity
+                # Videos are now kept as uint8 to save 4x memory
+                self._frame_mem_bytes = w * h * 3 * 1 # uint8 RGB
+                self._recalc_capacity_from_gb()
 
     def get_frame_count(self):
         return self.media.frame_count if self.media else 0
@@ -662,10 +792,22 @@ class PlayerCore:
             return frame
 
         # Cache miss
+        # In STREAM mode, we limit the cache to a small buffer (e.g. 16 frames)
+        # to smooth out I/O without hogging GBs of RAM.
+        if self.strategy == PlaybackStrategy.STREAM:
+            self.cache_capacity = 16
+            self.loader.cache_capacity = 16
+            
         path = self._get_path(index)
         self.loader.request(path, index, priority=0)
+        
+        # Adaptive prefetch based on strategy
         if self.prefetch_enabled:
              self.predictive_prefetch(index, self.last_direction)
+        
+        # Immediate prune to enforce strategy-specific limits
+        self._prune_cache(current_index=index)
+            
         return None
 
     def _get_path(self, index: int) -> str:
@@ -676,6 +818,37 @@ class PlayerCore:
     def predictive_prefetch(self, current_index: int, direction: int):
         if not self.prefetch_enabled or not self.media:
             return
+        
+        # STREAM mode: Absolutely no prefetching
+        if self.strategy == PlaybackStrategy.STREAM:
+            return
+
+        # PROGRESSIVE mode for sequences: Sequential only (no random jumps)
+        # (For videos, we already handle this in the worker burst)
+        is_video = self.media.type == 'video'
+        
+        if self.strategy == PlaybackStrategy.PROGRESSIVE:
+            if is_video:
+                return # Worker handles it
+            # For sequences in progressive, just load next 12 frames
+            for f in range(current_index + 1, current_index + 13):
+                if 0 <= f < self.media.frame_count:
+                    with self.cache_lock:
+                        if f not in self.cache:
+                            self.loader.request(self._get_path(f), f, priority=2)
+            return
+
+        # PERFORMANCE / READ_BEHIND mode
+        if is_video:
+            # For video, if READ_BEHIND is on, we might want to prefetch backwards too
+            if self.strategy == PlaybackStrategy.READ_BEHIND:
+                for f in range(current_index - self.read_behind_count, current_index):
+                    if 0 <= f < self.media.frame_count:
+                        with self.cache_lock:
+                            if f not in self.cache:
+                                self.loader.request(self._get_path(f), f, priority=3)
+            return
+
         cnt = self.media.frame_count
         fps = self.clock.speed()
         future_frame = current_index + int(fps * 0.8 * direction)
@@ -704,24 +877,89 @@ class PlayerCore:
         if not self.media:
             return
         cnt = self.media.frame_count
+        
+        # For videos, cap burst to avoid flooding single worker
+        if self.media.type == 'video':
+            count = min(count, 24, self.cache_capacity // 2)
+
         for f in range(start_index, min(start_index + count, cnt)):
             with self.cache_lock:
                 if f not in self.cache:
                     self.loader.request(self._get_path(f), f, priority=0)
 
-    def _prune_cache(self):
+    def _prune_cache(self, current_index: int = -1):
+        if not self.media: return
         with self.cache_lock:
-            while len(self.cache) > self.cache_capacity:
-                self.cache.popitem(last=False)
+            if len(self.cache) <= self.cache_capacity:
+                return
+
+            # Smart Pruning:
+            # We want to keep frames near the 'current_index' (playhead).
+            # If current_index is -1, we just do LRU.
+            if current_index < 0:
+                while len(self.cache) > self.cache_capacity:
+                    self.cache.popitem(last=False)
+                return
+
+            # Distance-based pruning
+            indices = list(self.cache.keys())
+            
+            # Determine "keep" range based on strategy
+            # For READ_BEHIND, we keep self.read_behind_count frames behind.
+            # For PERFORMANCE, we keep a symmetric window.
+            # For PROGRESSIVE, we primarily keep ahead.
+            
+            back_limit = 5
+            if self.strategy == PlaybackStrategy.READ_BEHIND:
+                back_limit = self.read_behind_count
+            elif self.strategy == PlaybackStrategy.PERFORMANCE:
+                back_limit = self.cache_capacity // 3
+                
+            def score(idx):
+                dist = idx - current_index
+                if dist < -back_limit: return abs(dist) * 10 # Very far behind, prune first
+                if dist < 0: return abs(dist) # Behind but within buffer
+                return dist # Ahead
+                
+            # Sort by "badness" (highest score = prune first)
+            indices.sort(key=score, reverse=True)
+            
+            to_remove = len(self.cache) - self.cache_capacity
+            for i in range(to_remove):
+                idx = indices[i]
+                if idx in self.cache:
+                    del self.cache[idx]
 
     def _recalc_capacity_from_gb(self):
         """Recalculate frame capacity from GB budget and per-frame memory size."""
         if self._frame_mem_bytes > 0:
             max_frames = int((self.cache_gb * 1024 * 1024 * 1024) / self._frame_mem_bytes)
             self.cache_capacity = max(10, max_frames)
+            self.loader.cache_capacity = self.cache_capacity
+
+    def set_strategy(self, strategy: PlaybackStrategy):
+        self.strategy = strategy
+        self.loader.strategy = strategy
+        
+        if strategy == PlaybackStrategy.STREAM:
+            # Stream mode uses tiny cache
+            self.set_cache_capacity(5)
+        else:
+            # Restore capacity from GB
+            self._recalc_capacity_from_gb()
+        
+        # Clear cache to ensure new logic applies
+        # (Optional, but cleaner for mode switching)
+        with self.cache_lock:
+            self.cache.clear()
+
+    def set_economy_mode(self, enabled: bool):
+        # Map old economy_mode to STREAM vs PERFORMANCE
+        self.set_strategy(PlaybackStrategy.STREAM if enabled else PlaybackStrategy.PERFORMANCE)
 
     def set_cache_capacity(self, capacity: int):
         self.cache_capacity = capacity
+        self.loader.cache_capacity = capacity
         self._prune_cache()
 
     def set_cache_gb(self, gb: float):

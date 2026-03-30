@@ -2,6 +2,7 @@ import numpy as np
 from PyQt6 import QtWidgets, QtCore, QtGui
 from vispy import scene
 from vispy.scene import visuals
+from vispy.visuals.shaders import Function
 
 class VispyViewport(QtWidgets.QWidget):
     """VisPy-based viewport with click interactions:
@@ -27,13 +28,16 @@ class VispyViewport(QtWidgets.QWidget):
         self.view.camera.aspect = 1.0
         self.view.camera.set_range(margin=0)
         
-        # Image visual (init with dummy 1x1 black frame to avoid NoneType shape errors)
+        # Image visual
+        # Initialize with uint8 for maximum performance (Direct GPU upload)
         self.image_visual = visuals.Image(
-            data=np.zeros((1, 1, 3), dtype=np.float32),
+            data=np.zeros((1, 1, 3), dtype=np.uint8),
             parent=self.view.scene, 
-            method='subdivide'
+            method='auto', # Standard method for performance
+            shading='simple'
         )
-        self.image_visual.interactive = True # Ensure it receives hover events
+        self.image_visual.interactive = True 
+        
         
         # Layout
         self.layout = QtWidgets.QVBoxLayout(self)
@@ -52,11 +56,36 @@ class VispyViewport(QtWidgets.QWidget):
         
         # Wire up click detection and canvas mouse events
         self._init_click_detection()
+        
+        # Intercept VisPy default key handling for Esc
+        self.canvas.events.key_press.connect(self._on_canvas_key_press)
+
+    def _on_canvas_key_press(self, event):
+        """Consume Esc key at the VisPy level to prevent default behavior."""
+        if event.key == 'Escape':
+            event.handled = True
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent):
+        """Handle Qt-level key events; ensure Esc is consumed."""
+        if event.key() == QtCore.Qt.Key.Key_Escape:
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _ensure_shader_hooked(self):
+        """No longer needed with Filter system, but kept as stub for compatibility."""
+        pass
 
     def set_exposure(self, val: float):
-        pass # Exposure handled on CPU now
+        """val: exposure in stops. (Not used in CPU-routing mode)."""
+        pass
 
     def set_gamma(self, val: float):
+        """Not used in CPU-routing mode."""
+        pass
+
+    def set_channel_mode(self, mode: str):
+        """Not used in CPU-routing mode."""
         pass
 
     @property
@@ -182,14 +211,18 @@ class VispyViewport(QtWidgets.QWidget):
         self.single_clicked.emit()
 
     def set_frame(self, frame):
-        """frame: numpy array (H, W, C), float32 in [0, 1]."""
+        """frame: numpy array (H, W, C), uint8 [0, 255] or float32 [0, 1]."""
         if frame is None:
             self.image_visual.visible = False
             return
             
         self.image_visual.visible = True
         # Flip vertically for correct VisPy display (0,0 is bottom-left)
+        # VisPy Image visual handles uint8 vs float32 mapping to [0, 1] internally.
         self.image_visual.set_data(frame[::-1])
+        
+        # Ensure shader is hooked after first frame/data upload
+        
         
         # Auto-fit if first frame or size changed
         if self._last_shape != frame.shape[:2]:
@@ -276,3 +309,6 @@ class VispyViewport(QtWidgets.QWidget):
                 self.main_window.load_compare_media(target)
             else:
                 self.main_window.load_media(target)
+
+
+

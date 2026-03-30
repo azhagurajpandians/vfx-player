@@ -2,8 +2,8 @@
   "ocio_input": "ACES - ACEScg",
   "ocio_output": "Output - sRGB",
   "ocio_enabled": true,
-  "exposure": 1.647,
-  "gamma": 1.0,
+  "exposure": 0.0,
+  "gamma": 0.1,
   "compare_offset": 0,
   "cache_size": 500,
   "ocio_config": "D:/exrtojpg/VFXPlayer/.knacktools/ocioconfig/OpenColorIOConfigs/aces_1.2/config.ocio",
@@ -17,8 +17,12 @@
       "output": null
     }
   },
-  "cache_gb": 4.0,
+  "cache_gb": 10.0,
   "cache_enabled": true,
-  "preload_cache": false,
-  "show_cached_timeline": true
+  "preload_cache": true,
+  "show_cached_timeline": true,
+  "economy_mode": true,
+  "playback_strategy": "performance",
+  "audio_volume": 0.21,
+  "audio_muted": false
 }

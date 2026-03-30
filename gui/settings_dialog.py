@@ -1,5 +1,6 @@
 
 from PyQt6 import QtWidgets, QtCore
+from core.player_core import PlaybackStrategy
 
 class SettingsDialog(QtWidgets.QDialog):
     def __init__(self, parent, prefs: dict, color_manager):
@@ -58,6 +59,36 @@ class SettingsDialog(QtWidgets.QDialog):
         self.show_cached_chk.setChecked(self.prefs.get('show_cached_timeline', True))
         self.show_cached_chk.setToolTip("Shows a green indicator on the timeline for frames that are currently cached in memory.")
         cg_layout.addWidget(self.show_cached_chk)
+
+        strat_row = QtWidgets.QHBoxLayout()
+        strat_lbl = QtWidgets.QLabel("Default Playback Strategy:")
+        self.strategy_combo = QtWidgets.QComboBox()
+        self.strategy_combo.addItems([
+            "Performance (Full Cache)",
+            "Progressive (Sequential)",
+            "Stream Only (No RAM Cache)",
+            "Read-behind Buffer"
+        ])
+        
+        # Mapping for setting initial value
+        strat_map = {
+            PlaybackStrategy.PERFORMANCE: 0,
+            PlaybackStrategy.PROGRESSIVE: 1,
+            PlaybackStrategy.STREAM: 2,
+            PlaybackStrategy.READ_BEHIND: 3
+        }
+        current_val = self.prefs.get('playback_strategy', 'performance')
+        try:
+            current_enum = PlaybackStrategy(current_val)
+            self.strategy_combo.setCurrentIndex(strat_map.get(current_enum, 0))
+        except ValueError:
+            self.strategy_combo.setCurrentIndex(0)
+            
+        strat_row.addWidget(strat_lbl)
+        strat_row.addWidget(self.strategy_combo)
+        strat_row.addStretch()
+        cg_layout.addLayout(strat_row)
+
         
         self.gen_layout.addWidget(cache_group)
         
@@ -158,6 +189,9 @@ class SettingsDialog(QtWidgets.QDialog):
         self.prefs['cache_gb'] = self.cache_gb_spin.value()
         self.prefs['preload_cache'] = self.preload_chk.isChecked()
         self.prefs['show_cached_timeline'] = self.show_cached_chk.isChecked()
+        # Map back to string value
+        strat_opts = ['performance', 'progressive', 'stream', 'readbehind']
+        self.prefs['playback_strategy'] = strat_opts[self.strategy_combo.currentIndex()]
         self.prefs['ocio_config'] = self.ocio_path_edit.text().strip()
         
         if 'defaults' not in self.prefs:
