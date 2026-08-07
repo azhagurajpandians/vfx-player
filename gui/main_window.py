@@ -1,6 +1,6 @@
 """Enhanced PyQt6 main window for VFXPlayer with compare & advanced controls."""
 
-import sys, os, json
+import sys, os, json, ctypes
 import numpy as np
 from typing import Optional, Tuple
 from PyQt6 import QtWidgets, QtGui, QtCore
@@ -10,6 +10,24 @@ from gui.vispy_viewport import VispyViewport
 from core.color_manager import ColorManager
 from gui.settings_dialog import SettingsDialog
 from core.player_core import PlaybackStrategy
+
+def set_dark_title_bar(hwnd):
+    if sys.platform == 'win32':
+        try:
+            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            value = ctypes.c_int(1)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                int(hwnd), DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(value), ctypes.sizeof(value)
+            )
+        except Exception:
+            try:
+                DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19
+                value = ctypes.c_int(1)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    int(hwnd), DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, ctypes.byref(value), ctypes.sizeof(value)
+                )
+            except Exception:
+                pass
 
 
 class PlayheadSlider(QtWidgets.QSlider):
@@ -43,10 +61,39 @@ class PlayheadSlider(QtWidgets.QSlider):
             }
         """)
 
+    def mousePressEvent(self, event: QtGui.QMouseEvent):  # type: ignore[override]
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            margin = 5
+            track_w = self.width() - (margin * 2)
+            rng = self.maximum() - self.minimum()
+            if track_w > 0 and rng > 0:
+                rel_x = event.pos().x() - margin
+                val = self.minimum() + int(round((rel_x / track_w) * rng))
+                val = max(self.minimum(), min(self.maximum(), val))
+                self.setValue(val)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent):  # type: ignore[override]
+        if event.buttons() & QtCore.Qt.MouseButton.LeftButton:
+            margin = 5
+            track_w = self.width() - (margin * 2)
+            rng = self.maximum() - self.minimum()
+            if track_w > 0 and rng > 0:
+                rel_x = event.pos().x() - margin
+                val = self.minimum() + int(round((rel_x / track_w) * rng))
+                val = max(self.minimum(), min(self.maximum(), val))
+                self.setValue(val)
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
     def set_cached_indices(self, indices: set):
         """Update the set of cached frame indices and repaint."""
-        self._cached_indices = indices
-        self.update()
+        if self._cached_indices != indices:
+            self._cached_indices = indices
+            self.update()
 
     def set_show_cached(self, show: bool):
         self._show_cached = show
@@ -298,6 +345,8 @@ class MainWindow(QtWidgets.QMainWindow):
             # Connect viewport click interactions
             self.viewport.single_clicked.connect(self._toggle_play_pause)
             self.viewport.double_clicked.connect(lambda: self._toggle_fullscreen(not self.fullscreen))
+            self.viewport.right_clicked.connect(self._show_context_menu)
+            self.viewport_b.right_clicked.connect(self._show_context_menu)
         except Exception as e:
             # Fallback or re-raise
             raise e
@@ -440,65 +489,48 @@ class MainWindow(QtWidgets.QMainWindow):
             self._audio_player = None
             self._audio_output = None
 
-    def _build_hud(self):
-        """Construct the bottom Heads-Up Display for controls (Nuke-style)."""
-        # Main HUD layout: Vertical (Slider Top, Controls Bottom)
-        self.hud_layout.setContentsMargins(0, 0, 0, 0)
-        self.hud_layout.setSpacing(0)
-        
-        # We need to rebuild the hud_container's layout to be Vertical if it was horizontal
-        # But self.hud_layout is already defined as QHBoxLayout in __init__?
-        # Let's check __init__. 
-        # In __init__: self.hud_layout = QtWidgets.QHBoxLayout(self.hud_container)
-        # We need to change this to QVBoxLayout or add a container.
-        # Since we can't easily change the layout type of an existing widget without re-creating it,
-        # let's reparent the current layout or just work with what we have? 
-        # Actually, it's better to clear the existing layout item in __init__ or just modify it here if possible.
-        # But `replace_file_content` on `_build_hud` won't change `__init__`.
-        # So I will treat `self.hud_layout` as the *container* interaction. 
-        # Wait, if `self.hud_layout` is QHBoxLayout, I can't put a vertical structure effectively unless I add a wrapper.
-        
-        # Let's clean up `self.hud_container` layout.
-        # We'll create a new strict layout inside this method.
-        
-        # Remove old layout if it exists (standard PyQt trick)
-        if self.hud_container.layout():
-            QtWidgets.QWidget().setLayout(self.hud_container.layout()) # Re-parent to dummy to delete?
-            # Or just delete the implementation? 
-            # Safest is to just make a new widget structure inside the existing generic container if I can't change __init__.
-            # But I CAN change __init__ in a separate tool call. 
-            # For now, let's assume I can't change __init__ easily in this single block.
-            # I will assume I can just delete the old layout or ignore it? No.
-            pass
+        # Auto-hide UI (Cinema Mode) setup
+        self.setMouseTracking(True)
+        self.central_widget.setMouseTracking(True)
+        self.viewport_container.setMouseTracking(True)
+        self._ui_visible = True
+        self._media_loaded = False
+        self._ui_autohide_timer = QtCore.QTimer(self)
+        self._ui_autohide_timer.setSingleShot(True)
+        self._ui_autohide_timer.setInterval(2500)
+        self._ui_autohide_timer.timeout.connect(self._hide_ui_controls)
 
-        # Use a local widget to hold everything if needed, but let's try to update __init__ too if we can.
-        # Actually, let's just use the existing `self.hud_container`.
-    
-
+        self.installEventFilter(self)
+        self.central_widget.installEventFilter(self)
+        self.viewport_container.installEventFilter(self)
+        if hasattr(self, 'viewport'):
+            self.viewport.installEventFilter(self)
+        if hasattr(self, 'viewport_b'):
+            self.viewport_b.installEventFilter(self)
 
     def _build_hud(self):
         """Construct the bottom Heads-Up Display for controls (Nuke-style)."""
         # Re-orient to Vertical: Slider (Row 1) | Controls (Row 2)
         
         # --- ROW 1: Timeline Slider ---
-        slider_container = QtWidgets.QWidget()
-        slider_container.setFixedHeight(24)
-        slider_container.setStyleSheet("background-color: #222; border-bottom: 1px solid #333;")
-        slider_layout = QtWidgets.QHBoxLayout(slider_container)
+        self.slider_container = QtWidgets.QWidget()
+        self.slider_container.setFixedHeight(24)
+        self.slider_container.setStyleSheet("background-color: #222; border-bottom: 1px solid #333;")
+        slider_layout = QtWidgets.QHBoxLayout(self.slider_container)
         slider_layout.setContentsMargins(0, 0, 0, 0)
         
         self.frame_slider = PlayheadSlider() # User custom class
         self.frame_slider.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.frame_slider.valueChanged.connect(self._show_frame)
+        self.frame_slider.valueChanged.connect(self.seek)
         
         slider_layout.addWidget(self.frame_slider)
-        self.hud_layout.addWidget(slider_container)
+        self.hud_layout.addWidget(self.slider_container)
         
         # --- ROW 2: Transport Controls ---
-        controls_container = QtWidgets.QWidget()
-        controls_container.setFixedHeight(36)
-        controls_container.setStyleSheet("background-color: #1a1a1a;")
-        controls_layout = QtWidgets.QHBoxLayout(controls_container)
+        self.controls_container = QtWidgets.QWidget()
+        self.controls_container.setFixedHeight(36)
+        self.controls_container.setStyleSheet("background-color: #1a1a1a;")
+        controls_layout = QtWidgets.QHBoxLayout(self.controls_container)
         controls_layout.setContentsMargins(10, 2, 10, 2)
         controls_layout.setSpacing(8)
         
@@ -767,7 +799,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Bottom HUD now focuses on playback/timeline.
         # Exposure and Gamma have moved to the top bar.
 
-        self.hud_layout.addWidget(controls_container)
+        self.hud_layout.addWidget(self.controls_container)
 
 
 
@@ -1006,6 +1038,23 @@ class MainWindow(QtWidgets.QMainWindow):
         fit_action.triggered.connect(self.viewport.fit_to_window)
         view_menu.addAction(fit_action)
         
+        view_menu.addSeparator()
+
+        # View Mode Presets (MPC-HC Style)
+        self.minimal_action = QtGui.QAction("Minimal View (Borderless)", self)
+        self.minimal_action.setCheckable(True)
+        self.minimal_action.setChecked(getattr(self, 'cinema_mode_enabled', True))
+        self.minimal_action.setShortcut("Ctrl+1")
+        self.minimal_action.triggered.connect(lambda: self._set_view_preset('minimal'))
+        view_menu.addAction(self.minimal_action)
+
+        self.normal_action = QtGui.QAction("Normal View", self)
+        self.normal_action.setCheckable(True)
+        self.normal_action.setChecked(not getattr(self, 'cinema_mode_enabled', True))
+        self.normal_action.setShortcut("Ctrl+2")
+        self.normal_action.triggered.connect(lambda: self._set_view_preset('normal'))
+        view_menu.addAction(self.normal_action)
+
         fs_action = QtGui.QAction("Fullscreen", self)
         fs_action.setCheckable(True)
         fs_action.setShortcut("F11")
@@ -1041,10 +1090,6 @@ class MainWindow(QtWidgets.QMainWindow):
         play_action.setShortcut("Space")
         play_action.triggered.connect(lambda: self.pause() if self.playing else self.play())
         play_menu.addAction(play_action)
-
-        stop_action = QtGui.QAction("Stop", self)
-        stop_action.triggered.connect(self.stop)
-        play_menu.addAction(stop_action)
 
         stop_action = QtGui.QAction("Stop", self)
         stop_action.triggered.connect(self.stop)
@@ -1277,6 +1322,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_pixel_probe(self, x: float, y: float):
         if not hasattr(self, 'lbl_probe') or not hasattr(self, 'core') or self.core.frame_count() == 0:
             return
+        if not self.lbl_probe.isVisible():
+            return
             
         frame_raw = self.core.get_frame(self.current_index)
         if frame_raw is None:
@@ -1471,11 +1518,21 @@ class MainWindow(QtWidgets.QMainWindow):
             
             if hasattr(self, 'frame_slider'):
                 self.frame_slider.set_show_cached(self.prefs.get('show_cached_timeline', True))
+            
+            self.cinema_mode_enabled = bool(self.prefs.get('cinema_mode_enabled', True))
                 
         except Exception:
             self.prefs = {}
 
     def _save_prefs(self):
+        if not hasattr(self, '_save_prefs_timer'):
+            self._save_prefs_timer = QtCore.QTimer(self)
+            self._save_prefs_timer.setSingleShot(True)
+            self._save_prefs_timer.setInterval(400)
+            self._save_prefs_timer.timeout.connect(self._do_save_prefs)
+        self._save_prefs_timer.start()
+
+    def _do_save_prefs(self):
         try:
             # Update prefs with current runtime state
             self.prefs['ocio_input'] = self.color_manager.input_cs
@@ -1491,6 +1548,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.prefs['show_cached_timeline'] = self.prefs.get('show_cached_timeline', True)
             self.prefs['audio_volume'] = getattr(self, '_audio_volume', 1.0)
             self.prefs['audio_muted'] = getattr(self, '_audio_muted', False)
+            self.prefs['cinema_mode_enabled'] = getattr(self, 'cinema_mode_enabled', True)
 
             with open(_PREFS_PATH, 'w', encoding='utf-8') as f:
                 json.dump(self.prefs, f, indent=2)
@@ -1631,6 +1689,139 @@ class MainWindow(QtWidgets.QMainWindow):
         # Auto-play on load as requested
         self.play()
 
+        # Mark media loaded and activate Cinema Mode (hide UI controls, keep video + timeline slider)
+        self._media_loaded = True
+        if getattr(self, 'cinema_mode_enabled', True):
+            self._set_frameless(True)
+            self._hide_ui_controls()
+
+    def _set_frameless(self, frameless: bool):
+        if getattr(self, '_is_frameless', False) == frameless or getattr(self, 'fullscreen', False):
+            return
+        self._is_frameless = frameless
+        pos = self.pos()
+        size = self.size()
+        was_max = self.isMaximized()
+        
+        if frameless:
+            # Set exact Window + FramelessWindowHint to strip OS title bar & window frame completely
+            self.setWindowFlags(QtCore.Qt.WindowType.Window | QtCore.Qt.WindowType.FramelessWindowHint)
+        else:
+            self.setWindowFlags(QtCore.Qt.WindowType.Window)
+            
+        if was_max:
+            self.showMaximized()
+        else:
+            self.move(pos)
+            self.resize(size)
+            self.show()
+        set_dark_title_bar(self.winId())
+
+    def _toggle_cinema_mode(self, enabled: bool = None):
+        if enabled is None:
+            enabled = not getattr(self, 'cinema_mode_enabled', True)
+        self._set_view_preset('minimal' if enabled else 'normal')
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        # In Minimal View, keep GUI hidden (no mouse-over unhide)
+        return super().eventFilter(watched, event)
+
+    def _set_view_preset(self, preset: str):
+        if preset == 'minimal':
+            self.cinema_mode_enabled = True
+            self._set_frameless(True)
+            self._hide_ui_controls()
+        elif preset == 'normal':
+            self.cinema_mode_enabled = False
+            self._set_frameless(False)
+            self._show_ui_controls()
+            
+        if hasattr(self, 'minimal_action'):
+            self.minimal_action.setChecked(self.cinema_mode_enabled)
+        if hasattr(self, 'normal_action'):
+            self.normal_action.setChecked(not self.cinema_mode_enabled)
+            
+        self._save_prefs()
+
+    def _show_context_menu(self, global_pos: QtCore.QPoint):
+        menu = QtWidgets.QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background-color: #1a1a1a; color: #ddd; border: 1px solid #333; font-family: 'Segoe UI', sans-serif; }
+            QMenu::item { padding: 6px 24px; }
+            QMenu::item:selected { background-color: #0078d4; color: white; }
+        """)
+        
+        view_sub = menu.addMenu("View")
+        
+        min_act = view_sub.addAction("Minimal View (1)")
+        min_act.setCheckable(True)
+        min_act.setChecked(getattr(self, 'cinema_mode_enabled', True))
+        min_act.triggered.connect(lambda: self._set_view_preset('minimal'))
+        
+        norm_act = view_sub.addAction("Normal View (2)")
+        norm_act.setCheckable(True)
+        norm_act.setChecked(not getattr(self, 'cinema_mode_enabled', True))
+        norm_act.triggered.connect(lambda: self._set_view_preset('normal'))
+        
+        fs_act = view_sub.addAction("Fullscreen (F11)")
+        fs_act.setCheckable(True)
+        fs_act.setChecked(getattr(self, 'fullscreen', False))
+        fs_act.triggered.connect(lambda: self._toggle_fullscreen(not self.fullscreen))
+
+        menu.addSeparator()
+        
+        play_act = menu.addAction("Pause" if self.playing else "Play")
+        play_act.triggered.connect(self._toggle_play_pause)
+        
+        stop_act = menu.addAction("Stop")
+        stop_act.triggered.connect(self.stop)
+        
+        menu.addSeparator()
+        
+        open_act = menu.addAction("Open Media...")
+        open_act.triggered.connect(self._open_file)
+        
+        exit_act = menu.addAction("Exit")
+        exit_act.triggered.connect(self.close)
+        
+        menu.exec(global_pos)
+
+    def _show_ui_controls(self):
+        self._ui_visible = True
+        self.menuBar().show()
+        self.statusBar().show()
+        if hasattr(self, 'hud_container'):
+            self.hud_container.show()
+            self.hud_container.setFixedHeight(60)
+        if hasattr(self, 'controls_container'):
+            self.controls_container.show()
+
+    def _hide_ui_controls(self):
+        self._ui_visible = False
+        self.menuBar().hide()
+        self.statusBar().hide()
+        if hasattr(self, 'hud_container'):
+            self.hud_container.hide()
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and getattr(self, '_is_frameless', False):
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent):
+        if event.buttons() == QtCore.Qt.MouseButton.LeftButton and getattr(self, '_drag_pos', None) is not None and getattr(self, '_is_frameless', False):
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent):
+        self._drag_pos = None
+        super().mouseReleaseEvent(event)
+
+
 
     def _show_frame(self, index: int):
         frame_raw = self.core.get_frame(index)
@@ -1652,25 +1843,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.viewport.fit_to_window()
             if self.side_by_side and hasattr(self, 'viewport_b'):
                 self.viewport_b.fit_to_window()
-            self._force_fit_next_frame = False
-
-        # Apply Gain, Gamma, OCIO and Channel Isolation via ColorManager (CPU)
-        # Fast path: bypass CPU array allocations for standard videos at default grading
-        if frame_raw is not None and frame_raw.dtype == np.uint8 and self.exposure == 0.0 and self.gamma == 1.0 and self.channel_mode == 'RGB':
-            frame_ready = frame_raw
-        else:
-            frame_ready = self.color_manager.process(frame_raw, self.exposure, self.gamma, self.channel_mode)
-            
-            # Convert back to uint8 for Vispy stability
-            if frame_ready is not None and frame_ready.dtype == np.float32:
-                frame_ready = (np.clip(frame_ready, 0, 1) * 255).astype(np.uint8)
-            
-        self.viewport.set_frame(frame_ready)
-        
-        # Ensure GPU adjustments are neutral since we're processing on CPU
-        self.viewport.set_exposure(0.0)
-        self.viewport.set_gamma(1.0)
-        self.viewport.set_channel_mode('RGB')
+            self._force_fit_next_frame = False        # Pass raw frame directly to viewport (GPU handles display mapping natively)
+        self.viewport.set_frame(frame_raw)
+        self.viewport.set_exposure(self.exposure)
+        self.viewport.set_gamma(self.gamma)
+        self.viewport.set_channel_mode(self.channel_mode)
         
         self.frame_slider.blockSignals(True)
         self.frame_slider.setValue(index)
@@ -1681,42 +1858,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.btn_draw.isChecked():
             strokes = self.annotations.get(index, [])
             self.viewport.set_annotations(strokes)
-
+ 
         if self.compare_loaded and self.core_b.frame_count() > 0:
             idx_b = max(0, min(self.core_b.frame_count() - 1, index + int(getattr(self, 'compare_offset', 0))))
             cframe_raw = self.core_b.get_frame(idx_b)
             
             if cframe_raw is not None:
                 if self.side_by_side:
-                    if cframe_raw is not None and cframe_raw.dtype == np.uint8 and self.exposure == 0.0 and self.gamma == 1.0 and self.channel_mode == 'RGB':
-                        cframe_ready = cframe_raw
-                    else:
-                        cframe_ready = self.color_manager.process(cframe_raw, self.exposure, self.gamma, self.channel_mode)
-                        if cframe_ready is not None and cframe_ready.dtype == np.float32:
-                            cframe_ready = (np.clip(cframe_ready, 0, 1) * 255).astype(np.uint8)
-                        
-                    self.viewport_b.set_frame(cframe_ready)
-                    
-                    # Reset GPU on viewport_b
-                    self.viewport_b.set_exposure(0.0)
-                    self.viewport_b.set_gamma(1.0)
-                    self.viewport_b.set_channel_mode('RGB')
-                    
+                    self.viewport_b.set_frame(cframe_raw)
+                    self.viewport_b.set_exposure(self.exposure)
+                    self.viewport_b.set_gamma(self.gamma)
+                    self.viewport_b.set_channel_mode(self.channel_mode)
                     self.viewport_b.show()
                 elif self.wipe_mode:
                     self.viewport_b.hide()
-                    # Wipe is CPU-side, but bypass heavy ColorManager if possible
-                    if frame_raw is not None and frame_raw.dtype == np.uint8 and self.exposure == 0.0 and self.gamma == 1.0 and self.channel_mode == 'RGB':
-                        frame = frame_raw
-                    else:
-                        frame = self.color_manager.process(frame_raw, self.exposure, self.gamma, self.channel_mode)
-                    
-                    if cframe_raw is not None and cframe_raw.dtype == np.uint8 and self.exposure == 0.0 and self.gamma == 1.0 and self.channel_mode == 'RGB':
-                        cframe = cframe_raw
-                    else:
-                        cframe = self.color_manager.process(cframe_raw, self.exposure, self.gamma, self.channel_mode)
-                        
-                    self.viewport.composite_wipe(frame, cframe, self.wipe_slider.value()/1000.0)
+                    self.viewport.composite_wipe(frame_raw, cframe_raw, self.wipe_slider.value()/1000.0)
+                    self.viewport.set_exposure(self.exposure)
+                    self.viewport.set_gamma(self.gamma)
+                    self.viewport.set_channel_mode(self.channel_mode)
             if self.btn_draw.isChecked() and self.side_by_side:
                 self.viewport_b.set_annotations(strokes)
 
@@ -1784,6 +1943,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def seek(self, index: int, update_audio=True):
         idx = int(index)
         if 0 <= idx < self.core.frame_count():
+            # Update elapsed timer and start index so playback resumes smoothly from this new frame
+            if self.playing:
+                if self._elapsed_timer is None:
+                    self._elapsed_timer = QtCore.QElapsedTimer()
+                self._elapsed_timer.restart()
+                self._play_start_index = idx
+
             self._show_frame(idx)
             # Sync audio position for video files
             if update_audio and self._audio_player and self._audio_player.source().isValid():
@@ -2131,22 +2297,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         ratio = self.wipe_slider.value() / 1000.0
         if self.compare_loaded and self.core_b.frame_count() > 0:
-            # obtain current frames for composite (reuse cached)
             base_raw = self.core.get_frame(self.current_index)
             idx_b = max(0, min(self.core_b.frame_count()-1, self.current_index + int(getattr(self, 'compare_offset', 0))))
             top_raw = self.core_b.get_frame(idx_b)
             
-            if base_raw is not None:
-                base = self.color_manager.process(base_raw, self.exposure, self.gamma, self.channel_mode)
-            else:
-                base = None
-            if top_raw is not None:
-                top = self.color_manager.process(top_raw, self.exposure, self.gamma, self.channel_mode)
-            else:
-                top = None
-            
-            if base is not None and top is not None:
-                self.viewport.composite_wipe(base, top, ratio)
+            if base_raw is not None and top_raw is not None:
+                self.viewport.composite_wipe(base_raw, top_raw, ratio)
+                self.viewport.set_exposure(self.exposure)
+                self.viewport.set_gamma(self.gamma)
+                self.viewport.set_channel_mode(self.channel_mode)
 
     # ---------- Folder Navigation (Page Up / Page Down) ----------
     _MEDIA_EXTS = {'.mov', '.mp4', '.avi', '.mkv', '.mxf', '.webm', '.exr'}
@@ -2232,7 +2391,22 @@ class MainWindow(QtWidgets.QMainWindow):
         elif key == QtCore.Qt.Key.Key_Space:
             self.pause() if self.playing else self.play()
         elif key == QtCore.Qt.Key.Key_C:
-            self._set_channel('RGB')
+            if event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier:
+                self._set_view_preset('minimal' if not self.cinema_mode_enabled else 'normal')
+            else:
+                self._set_channel('RGB')
+        elif key in (QtCore.Qt.Key.Key_Alt, QtCore.Qt.Key.Key_AltGr):
+            if self.menuBar().isHidden():
+                self.menuBar().show()
+            else:
+                if getattr(self, 'cinema_mode_enabled', True) and not getattr(self, '_ui_visible', True):
+                    self.menuBar().hide()
+        elif key == QtCore.Qt.Key.Key_1 and not (event.modifiers() & QtCore.Qt.KeyboardModifier.AltModifier):
+            self._set_view_preset('minimal')
+        elif key == QtCore.Qt.Key.Key_2 and not (event.modifiers() & QtCore.Qt.KeyboardModifier.AltModifier):
+            self._set_view_preset('normal')
+        elif key == QtCore.Qt.Key.Key_3 and not (event.modifiers() & QtCore.Qt.KeyboardModifier.AltModifier):
+            self._toggle_fullscreen(not self.fullscreen)
         elif key == QtCore.Qt.Key.Key_R:
             self._set_channel('R')
         elif key == QtCore.Qt.Key.Key_G:
@@ -2424,6 +2598,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _toggle_economy_mode(self, checked):
         # Legacy support for old settings/buttons
         self._set_playback_strategy(PlaybackStrategy.STREAM if checked else PlaybackStrategy.PERFORMANCE)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        set_dark_title_bar(self.winId())
 
     def closeEvent(self, event):
         self._save_prefs()

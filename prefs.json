@@ -24,5 +24,6 @@
   "economy_mode": true,
   "playback_strategy": "performance",
   "audio_volume": 1.0,
-  "audio_muted": false
+  "audio_muted": false,
+  "cinema_mode_enabled": false
 }

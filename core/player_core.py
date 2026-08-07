@@ -21,6 +21,7 @@ import collections
 import numpy as np
 import traceback
 import enum
+import av
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Any
 
@@ -189,98 +190,99 @@ def probe_video(path: str) -> dict:
 
 
 class FFmpegReader:
-    """Read video frames via FFmpeg subprocess pipe. Supports ProRes, DNxHR, etc."""
+    """Read video frames via PyAV wrapper. Supports ProRes, DNxHR, etc. with native seeking."""
 
     def __init__(self, path: str, width: int, height: int):
         self.path = path
         self.width = width
         self.height = height
-        self.frame_size = width * height * 3  # RGB24
-        self._proc = None
-        self._current_frame = 0
-        self._ffmpeg = _find_ffmpeg()
+        self._container = None
+        self._stream = None
+        self._current_frame = -1
+        self._frames_generator = None
+        self.is_available = True
+        self._open()
 
-    def _start_process(self, start_frame: int = 0, fps: float = 24.0):
-        """Start or restart FFmpeg subprocess at given frame."""
-        self.close()
-        if not self._ffmpeg:
-            return False
-
-        cmd = [self._ffmpeg, '-hide_banner', '-loglevel', 'error', '-hwaccel', 'auto']
-
-        # Seek to start_frame if not 0
-        if start_frame > 0:
-            seek_sec = start_frame / fps
-            cmd.extend(['-ss', f'{seek_sec:.4f}'])
-
-        cmd.extend([
-            '-i', self.path,
-            '-f', 'rawvideo',
-            '-pix_fmt', 'rgb24',
-            '-v', 'error',
-            '-'
-        ])
-        
-        # Optimize for faster throughput
-        bufsize = self.frame_size * 8  # 8 frames buffer
-
+    def _open(self):
         try:
-            self._proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=bufsize,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-            )
-            self._current_frame = start_frame
-            return True
+            self._container = av.open(self.path)
+            self._stream = self._container.streams.video[0]
+            # Enable multi-threaded decoding in PyAV natively
+            self._stream.thread_type = "AUTO"
+            self._frames_generator = None
+            self._current_frame = -1
         except Exception:
             traceback.print_exc()
-            return False
 
     def read_frame(self, target_index: int, fps: float = 24.0, seek: bool = False):
         """Read frame at target_index. Returns RGB uint8 numpy array or None."""
-        if self._proc is None or self._proc.poll() is not None:
-            if not self._start_process(target_index, fps):
+        if not self._container:
+            self._open()
+            if not self._container:
                 return None
 
-        # If target is behind current position or too far ahead, seek (unless forced seek)
-        if seek or target_index < self._current_frame or target_index > self._current_frame + 200:
-            if not self._start_process(target_index, fps):
-                return None
+        # Seek if forced, target is backwards, or target is significantly ahead (>30 frames)
+        need_seek = seek or (self._current_frame < 0) or (target_index < self._current_frame) or (target_index > self._current_frame + 30)
 
-        # Skip frames to reach target
-        while self._current_frame < target_index:
-            skip_data = self._proc.stdout.read(self.frame_size)
-            if len(skip_data) < self.frame_size:
-                # EOF or error, restart at target
-                if not self._start_process(target_index, fps):
+        if need_seek:
+            try:
+                time_base = float(self._stream.time_base)
+                sec = target_index / fps
+                pts = int(sec / time_base)
+                
+                self._container.seek(pts, stream=self._stream)
+                self._frames_generator = self._container.decode(self._stream)
+                self._current_frame = -1
+            except Exception:
+                traceback.print_exc()
+                self._open()
+                try:
+                    time_base = float(self._stream.time_base)
+                    sec = target_index / fps
+                    pts = int(sec / time_base)
+                    self._container.seek(pts, stream=self._stream)
+                    self._frames_generator = self._container.decode(self._stream)
+                    self._current_frame = -1
+                except Exception:
                     return None
+
+        frame = None
+        while True:
+            try:
+                av_frame = next(self._frames_generator)
+                if av_frame.pts is not None:
+                    time_base = float(self._stream.time_base)
+                    pts_sec = av_frame.pts * time_base
+                    curr_idx = int(round(pts_sec * fps))
+                else:
+                    curr_idx = self._current_frame + 1
+
+                self._current_frame = curr_idx
+
+                if self._current_frame == target_index:
+                    frame = av_frame.to_ndarray(format='rgb24')
+                    break
+                elif self._current_frame > target_index:
+                    frame = av_frame.to_ndarray(format='rgb24')
+                    break
+            except (StopIteration, av.AVError):
                 break
-            self._current_frame += 1
+            except Exception:
+                traceback.print_exc()
+                break
 
-        # Read target frame
-        raw = self._proc.stdout.read(self.frame_size)
-        if len(raw) < self.frame_size:
-            return None
-
-        self._current_frame += 1
-        frame = np.frombuffer(raw, dtype=np.uint8).reshape((self.height, self.width, 3))
         return frame
 
     def close(self):
-        if self._proc is not None:
+        if self._container:
             try:
-                self._proc.stdout.close()
-                self._proc.kill()
-                self._proc.wait(timeout=2)
+                self._container.close()
             except Exception:
                 pass
-            self._proc = None
-
-    @property
-    def is_available(self):
-        return self._ffmpeg is not None
+            self._container = None
+            self._stream = None
+            self._frames_generator = None
+            self._current_frame = -1
 
 
 class FrameLoader:
@@ -335,8 +337,14 @@ class FrameLoader:
 
         item = (priority, time.time(), index, path)
         if self._is_video(path):
+            if priority == 0:
+                with self.lock:
+                    self._vid_queue = queue.PriorityQueue()
             self._vid_queue.put(item)
         else:
+            if priority == 0:
+                with self.lock:
+                    self._seq_queue = queue.PriorityQueue()
             self._seq_queue.put(item)
 
     def clear_pending(self):
@@ -642,7 +650,9 @@ class PlayerCore:
         self.clock = PlaybackClock()
         self.last_direction = 1
 
-        self.loader = FrameLoader(self.cache, self.cache_lock, seq_workers=4)
+        import os
+        workers = max(4, min(os.cpu_count() or 4, 8))
+        self.loader = FrameLoader(self.cache, self.cache_lock, seq_workers=workers)
         self.loader.start()
 
     def load_sequence(self, folder_path):
@@ -901,34 +911,26 @@ class PlayerCore:
                     self.cache.popitem(last=False)
                 return
 
-            # Distance-based pruning
-            indices = list(self.cache.keys())
-            
-            # Determine "keep" range based on strategy
-            # For READ_BEHIND, we keep self.read_behind_count frames behind.
-            # For PERFORMANCE, we keep a symmetric window.
-            # For PROGRESSIVE, we primarily keep ahead.
-            
+            # O(1) Check oldest keys first to avoid N log N sorting overhead
             back_limit = 5
             if self.strategy == PlaybackStrategy.READ_BEHIND:
                 back_limit = self.read_behind_count
             elif self.strategy == PlaybackStrategy.PERFORMANCE:
                 back_limit = self.cache_capacity // 3
                 
-            def score(idx):
+            keys_to_remove = []
+            for idx in self.cache:
+                if len(self.cache) - len(keys_to_remove) <= self.cache_capacity:
+                    break
                 dist = idx - current_index
-                if dist < -back_limit: return abs(dist) * 10 # Very far behind, prune first
-                if dist < 0: return abs(dist) # Behind but within buffer
-                return dist # Ahead
+                if dist < -back_limit or dist > self.cache_capacity:
+                    keys_to_remove.append(idx)
+                    
+            for idx in keys_to_remove:
+                del self.cache[idx]
                 
-            # Sort by "badness" (highest score = prune first)
-            indices.sort(key=score, reverse=True)
-            
-            to_remove = len(self.cache) - self.cache_capacity
-            for i in range(to_remove):
-                idx = indices[i]
-                if idx in self.cache:
-                    del self.cache[idx]
+            while len(self.cache) > self.cache_capacity:
+                self.cache.popitem(last=False)
 
     def _recalc_capacity_from_gb(self):
         """Recalculate frame capacity from GB budget and per-frame memory size."""
