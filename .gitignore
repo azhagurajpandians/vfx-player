@@ -26,3 +26,6 @@ cxfreeze_*.txt
 applog*.txt
 debug_*.txt
 micromamba*
+test_*.png
+dist_installer/
+!vfx_review_player.spec

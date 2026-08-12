@@ -643,6 +643,7 @@ class PlayerCore:
         self.read_behind_count = 12
         self._frame_mem_bytes = 0  # Auto-set when first frame is cached
         self.media: Optional[MediaInfo] = None
+        self._frame_metadata_cache = {}
 
         self.cache_lock = threading.Lock()
         self.cache = collections.OrderedDict()
@@ -656,6 +657,7 @@ class PlayerCore:
         self.loader.start()
 
     def load_sequence(self, folder_path):
+        self._frame_metadata_cache.clear()
         self.sequence = sorted(glob.glob(os.path.join(folder_path, '*.exr')))
         self.current_frame = 0
         if self.sequence:
@@ -698,6 +700,7 @@ class PlayerCore:
             traceback.print_exc()
 
     def load(self, path: str):
+        self._frame_metadata_cache.clear()
         with self.cache_lock:
             self.cache.clear()
             self.loader.clear_pending()
@@ -764,6 +767,35 @@ class PlayerCore:
 
     def media_fps(self) -> float:
         return float(self.media.fps) if self.media else 24.0
+
+    def get_metadata_for_frame(self, index: int) -> dict:
+        if not self.media or index < 0 or index >= self.frame_count():
+            return {}
+        if self.media.type == 'video':
+            return self.media.metadata
+            
+        if index in self._frame_metadata_cache:
+            return self._frame_metadata_cache[index]
+            
+        path = self._get_path(index)
+        meta = {}
+        try:
+            import OpenImageIO as oiio
+            inp = oiio.ImageInput.open(path)
+            if inp:
+                spec = inp.spec()
+                for i in range(len(spec.extra_attribs)):
+                    attr = spec.extra_attribs[i]
+                    if attr.type.basetype == oiio.BASETYPE.STRING:
+                         meta[attr.name] = spec.get_string_attribute(attr.name)
+                    elif attr.type.basetype in (oiio.BASETYPE.INT, oiio.BASETYPE.FLOAT):
+                         meta[attr.name] = spec.get_float_attribute(attr.name)
+                inp.close()
+        except Exception:
+            pass
+            
+        self._frame_metadata_cache[index] = meta
+        return meta
 
     def get_frame(self, index: int):
         if self.media is None or not (0 <= index < self.media.frame_count):

@@ -10,6 +10,9 @@ from gui.vispy_viewport import VispyViewport
 from core.color_manager import ColorManager
 from gui.settings_dialog import SettingsDialog
 from core.player_core import PlaybackStrategy
+from gui.metadata_dialog import MetadataDialog
+from gui.export_dialog import ExportDialog
+from gui.annotation_toolbar import AnnotationToolbar
 
 def set_dark_title_bar(hwnd):
     if sys.platform == 'win32':
@@ -312,25 +315,83 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Apply "Dark Pro" Theme
         self.setStyleSheet("""
-            QMainWindow, QWidget { background-color: #121212; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; }
-            QMenuBar { background-color: #1a1a1a; border-bottom: 1px solid #333; }
-            QMenuBar::item { padding: 8px 12px; }
-            QMenuBar::item:selected { background-color: #333; }
-            QMenu { background-color: #1a1a1a; border: 1px solid #333; }
-            QMenu::item { padding: 6px 24px; }
-            QMenu::item:selected { background-color: #0078d4; }
-            QScrollBar:vertical { background: #1a1a1a; width: 12px; }
-            QScrollBar::handle:vertical { background: #444; min-height: 20px; border-radius: 6px; }
+            QMainWindow, QWidget { background-color: #121214; color: #e0e0e4; font-family: 'Segoe UI', sans-serif; }
+            QMenuBar { background-color: #161618; color: #c8c8cc; font-size: 12px; font-weight: 600; border-bottom: 1px solid #2a2a2e; padding: 1px 4px; }
+            QMenuBar::item { background: transparent; padding: 4px 10px; border-radius: 4px; margin: 1px; }
+            QMenuBar::item:selected { background-color: #2c2c30; color: #ffffff; }
+            QMenuBar::item:pressed { background-color: #0a84ff; color: #ffffff; }
+            QMenu { background-color: #1c1c1e; color: #e0e0e4; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; font-size: 12px; }
+            QMenu::item { padding: 5px 24px 5px 10px; border-radius: 4px; }
+            QMenu::item:selected { background-color: #0a84ff; color: #ffffff; }
+            QMenu::separator { height: 1px; background-color: #38383a; margin: 4px 6px; }
+            QScrollBar:vertical { background: #161618; width: 12px; }
+            QScrollBar::handle:vertical { background: #38383a; min-height: 20px; border-radius: 6px; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
-            QSplitter::handle { background: #333; }
-            QStatusBar { background-color: #1a1a1a; color: #888; }
-            QPushButton { background-color: #2a2a2a; border: none; border-radius: 4px; padding: 6px 12px; }
-            QPushButton:hover { background-color: #3a3a3a; }
-            QPushButton:pressed { background-color: #0078d4; }
-            QLineEdit { background-color: #222; border: 1px solid #333; border-radius: 4px; padding: 4px; color: #ddd; selection-background-color: #0078d4; }
-            QComboBox { background-color: #222; border: 1px solid #333; border-radius: 4px; padding: 4px; }
-            QDoubleSpinBox, QSpinBox { background-color: #222; border: 1px solid #333; border-radius: 4px; padding: 4px; }
-            QLabel { color: #aaa; }
+            QSplitter::handle { background: #2a2a2e; }
+            QStatusBar { background-color: #141416; color: #88888d; }
+            QPushButton { background-color: #242427; border: 1px solid #3c3c40; border-radius: 4px; padding: 5px 12px; font-size: 11px; font-weight: 500; }
+            QPushButton:hover { background-color: #2c2c30; border-color: #0a84ff; color: #ffffff; }
+            QPushButton:pressed { background-color: #0a84ff; color: #ffffff; }
+            QLineEdit { background-color: #1c1c1e; border: 1px solid #3c3c40; border-radius: 4px; padding: 4px; color: #ddd; selection-background-color: #0a84ff; }
+            QComboBox {
+                background-color: #242427;
+                color: #e0e0e5;
+                border: 1px solid #3c3c40;
+                border-radius: 4px;
+                padding: 2px 20px 2px 8px;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QComboBox:hover {
+                background-color: #2c2c30;
+                border-color: #0a84ff;
+                color: #ffffff;
+            }
+            QComboBox:focus, QComboBox:on {
+                border-color: #0a84ff;
+                background-color: #2c2c30;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 18px;
+                border: none;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #a0a0a5;
+                margin-right: 6px;
+            }
+            QComboBox::down-arrow:hover {
+                border-top: 5px solid #0a84ff;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1c1c1e;
+                color: #e0e0e5;
+                border: 1px solid #3c3c40;
+                border-radius: 6px;
+                padding: 4px;
+                outline: 0px;
+                selection-background-color: #0a84ff;
+                selection-color: #ffffff;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 24px;
+                padding: 3px 8px;
+                border-radius: 3px;
+            }
+            QComboBox QAbstractItemView::item:hover {
+                background-color: #2c2c30;
+                color: #ffffff;
+            }
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #0a84ff;
+                color: #ffffff;
+            }
+            QDoubleSpinBox, QSpinBox { background-color: #1c1c1e; border: 1px solid #3c3c40; border-radius: 4px; padding: 4px; }
+            QLabel { color: #aaaaaf; }
         """)
 
         # Viewports
@@ -362,7 +423,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fullscreen = False
         self.properties_visible = False
         self.compare_offset = 0
-        self.annotations = {} # mapping frame index -> list of stroke dicts
+        # Annotation state: frame_index -> list of stroke dicts
+        # Stroke dict schema:
+        # {'tool': str, 'points': [(x,y)...], 'points2': [(x,y)...]|None,
+        #  'color': (r,g,b,a), 'width': int, 'text': str|None}
+        self.annotations = {}
+        self._annotation_undo_stack: dict[int, list] = {}  # per-frame undo snapshots
+        self._annotation_redo_stack: dict[int, list] = {}  # per-frame redo snapshots
         self.central_widget = QtWidgets.QWidget()
         self.setCentralWidget(self.central_widget)
         
@@ -378,6 +445,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.viewport_layout.addWidget(self.splitter)
         
         self.main_layout.addWidget(self.viewport_container, 1)
+
+        # Annotation toolbar (hidden until activated)
+        self.annotation_toolbar = AnnotationToolbar()
+        self.annotation_toolbar.hide()
+        self.main_layout.addWidget(self.annotation_toolbar)
 
         # File Properties HUD (Overlay)
         self.props_hud = FilePropertiesHUD(self.viewport_container)
@@ -433,6 +505,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Build menus & HUD
         self._build_menu()
         self._build_hud()
+        self._wire_annotation_toolbar()
         
 
 
@@ -641,37 +714,30 @@ class MainWindow(QtWidgets.QMainWindow):
         
         controls_layout.addStretch(1) # Spacer
         
-        # --- Drawing Tools ---
-        self.btn_draw = QtWidgets.QPushButton("Draw")
-        self.btn_draw.setCheckable(True)
-        self.btn_draw.setFixedSize(60, 28)
-        self.btn_draw.setToolTip("Toggle Annotation Mode")
-        self.btn_draw.setStyleSheet("""
-            QPushButton { background: transparent; color: #ccc; font-size: 13px; border: 1px solid #444; border-radius: 4px; font-weight: bold; }
-            QPushButton:checked { color: #fff; background: #c62828; border: 1px solid #ff5252; }
-            QPushButton:hover { background: #333; }
+        # --- Annotate Toggle Button (replaces old Draw/Clear/Color controls) ---
+        self.btn_annotate = QtWidgets.QPushButton("✏ Annotate")
+        self.btn_annotate.setCheckable(True)
+        self.btn_annotate.setFixedSize(90, 28)
+        self.btn_annotate.setToolTip("Toggle Annotation Mode (shows/hides annotation toolbar)")
+        self.btn_annotate.setStyleSheet("""
+            QPushButton {
+                background: #2a2a2c;
+                color: #aaa;
+                font-size: 12px;
+                border: 1px solid #444;
+                border-radius: 5px;
+                font-weight: bold;
+                padding: 0 6px;
+            }
+            QPushButton:checked {
+                color: #fff;
+                background: #0a84ff;
+                border: 1px solid #0a84ff;
+            }
+            QPushButton:hover { background: #3a3a3c; color: #fff; }
         """)
-        self.btn_draw.clicked.connect(self._toggle_draw_mode)
-        controls_layout.addWidget(self.btn_draw)
-        
-        self.draw_color_combo = QtWidgets.QComboBox()
-        self.draw_color_combo.addItems(["Red", "Green", "Blue", "Yellow"])
-        self.draw_color_combo.setStyleSheet("""
-            QComboBox { background: #222; color: #ddd; border: 1px solid #444; border-radius: 3px; padding: 2px 5px; }
-            QComboBox::drop-down { border: none; }
-        """)
-        self.draw_color_combo.currentIndexChanged.connect(self._change_draw_color)
-        controls_layout.addWidget(self.draw_color_combo)
-        
-        self.btn_clear_draw = QtWidgets.QPushButton("Clear")
-        self.btn_clear_draw.setFixedSize(45, 28)
-        self.btn_clear_draw.setToolTip("Clear Annotations for Current Frame")
-        self.btn_clear_draw.setStyleSheet("""
-            QPushButton { background: transparent; color: #ccc; font-size: 13px; border: 1px solid #444; border-radius: 4px; }
-            QPushButton:hover { background: #333; color: white; }
-        """)
-        self.btn_clear_draw.clicked.connect(self._clear_annotations)
-        controls_layout.addWidget(self.btn_clear_draw)
+        self.btn_annotate.clicked.connect(self._toggle_annotate_mode)
+        controls_layout.addWidget(self.btn_annotate)
         
         controls_layout.addSpacing(20)
         
@@ -838,179 +904,319 @@ class MainWindow(QtWidgets.QMainWindow):
     # Legacy UI construction methods removed
 
     def _build_menu(self):
+        # Style Menu Bar and Dropdown Menus
+        self.menuBar().setStyleSheet("""
+            QMenuBar {
+                background-color: #141416;
+                color: #c8c8cc;
+                font-size: 12px;
+                font-weight: 600;
+                font-family: 'Segoe UI', sans-serif;
+                border-bottom: 1px solid #2a2a2e;
+                padding: 1px 4px;
+            }
+            QMenuBar::item {
+                background: transparent;
+                padding: 4px 10px;
+                border-radius: 4px;
+                margin: 2px 1px;
+            }
+            QMenuBar::item:selected {
+                background-color: #2c2c30;
+                color: #ffffff;
+            }
+            QMenuBar::item:pressed {
+                background-color: #0a84ff;
+                color: #ffffff;
+            }
+            QMenu {
+                background-color: #1c1c1e;
+                color: #e0e0e4;
+                border: 1px solid #38383a;
+                border-radius: 6px;
+                padding: 4px;
+                font-size: 12px;
+                font-family: 'Segoe UI', sans-serif;
+            }
+            QMenu::item {
+                padding: 5px 24px 5px 10px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #0a84ff;
+                color: #ffffff;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #38383a;
+                margin: 4px 6px;
+            }
+        """)
+
         # File Menu
         file_menu = self.menuBar().addMenu("File")
-        
-        # ... (rest of menus will be added normally)
-        
-        # We want the Viewer dropdown to appear in the Menu Bar, right after plugins/help
-        # But we build menus sequentially. "Playback" is added later.
-        # So we should create a placeholder or add it at the end of _build_menu.
-        
-        # Let's defer adding the Viewer widget until after other menus are added.
-        # But here we are at the top of _build_menu. 
-        # We can init the widget here and add it at the end.
-        
+
         self.viewer_container = QtWidgets.QWidget()
-        # Ensure it's transparent to blend with menu bar
         self.viewer_container.setStyleSheet("background: transparent;")
         vc_layout = QtWidgets.QHBoxLayout(self.viewer_container)
-        vc_layout.setContentsMargins(10, 0, 5, 0) # Less horizontal padding
-        vc_layout.setSpacing(6) # Tighter spacing
-        
-        # --- NEW GPU GAIN / GAMMA SLIDERS ---
-        # Exposure (Gain)
-        self.exp_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.exp_slider.setRange(-8000, 8000) # Maps to -8.0 to 8.0 stop
-        self.exp_slider.setValue(int(self.exposure * 1000))
-        self.exp_slider.setFixedWidth(80) # Narrower
-        self.exp_slider.setToolTip("Exposure (f-stops). Click 'E' to reset.")
-        self.exp_slider.setStyleSheet("""
+        vc_layout.setContentsMargins(10, 0, 5, 0)
+        vc_layout.setSpacing(6)
+
+        # Dropdown Combobox QSS
+        header_combo_style = """
+            QComboBox {
+                background-color: #242427;
+                color: #e0e0e5;
+                border: 1px solid #3c3c40;
+                border-radius: 4px;
+                padding: 2px 20px 2px 8px;
+                font-size: 11px;
+                font-family: 'Segoe UI', sans-serif;
+                font-weight: 600;
+                min-height: 20px;
+                max-height: 20px;
+            }
+            QComboBox:hover {
+                background-color: #2c2c30;
+                border-color: #0a84ff;
+                color: #ffffff;
+            }
+            QComboBox:focus, QComboBox:on {
+                border-color: #0a84ff;
+                background-color: #2c2c30;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 18px;
+                border: none;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #a0a0a5;
+                margin-right: 6px;
+            }
+            QComboBox::down-arrow:hover {
+                border-top: 5px solid #0a84ff;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1c1c1e;
+                color: #e0e0e5;
+                border: 1px solid #3c3c40;
+                border-radius: 6px;
+                padding: 4px;
+                outline: 0px;
+                selection-background-color: #0a84ff;
+                selection-color: #ffffff;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 24px;
+                padding: 3px 8px;
+                border-radius: 3px;
+            }
+            QComboBox QAbstractItemView::item:hover {
+                background-color: #2c2c30;
+                color: #ffffff;
+            }
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #0a84ff;
+                color: #ffffff;
+            }
+        """
+
+        header_reset_btn_style = """
+            QPushButton {
+                background: #242427;
+                color: #a0a0a5;
+                border: 1px solid #3c3c40;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 10px;
+                font-family: 'Segoe UI', sans-serif;
+                min-width: 18px; max-width: 18px;
+                min-height: 18px; max-height: 18px;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background: #2c2c30;
+                color: #ffffff;
+                border-color: #0a84ff;
+            }
+            QPushButton:pressed {
+                background: #0a84ff;
+                color: #ffffff;
+            }
+        """
+
+        header_slider_style = """
             QSlider::groove:horizontal {
-                border: 1px solid #555;
+                border: 1px solid #333336;
                 height: 4px;
-                background: #333;
+                background: #18181a;
                 margin: 2px 0;
                 border-radius: 2px;
             }
             QSlider::handle:horizontal {
-                background: #bbb;
-                border: 1px solid #777;
+                background: #c8c8cc;
+                border: 1px solid #5a5a5e;
                 width: 10px;
-                height: 14px;
-                margin: -6px 0;
+                height: 12px;
+                margin: -4px 0;
                 border-radius: 2px;
             }
             QSlider::handle:horizontal:hover {
-                background: #ddd;
+                background: #ffffff;
+                border-color: #0a84ff;
             }
-        """)
-        
+        """
+
+        ocio_btn_style = """
+            QPushButton {
+                background-color: #242427;
+                color: #a0a0a5;
+                border: 1px solid #3c3c40;
+                border-radius: 4px;
+                padding: 2px 10px;
+                font-size: 11px;
+                font-weight: bold;
+                font-family: 'Segoe UI', sans-serif;
+                min-height: 20px; max-height: 20px;
+            }
+            QPushButton:hover {
+                background-color: #2c2c30;
+                color: #ffffff;
+                border-color: #5a5a60;
+            }
+            QPushButton:checked {
+                background-color: #0a84ff;
+                border-color: #0a84ff;
+                color: #ffffff;
+            }
+        """
+
+        # --- GPU GAIN / GAMMA SLIDERS ---
+        # Exposure (Gain)
+        self.exp_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.exp_slider.setRange(-8000, 8000)
+        self.exp_slider.setValue(int(self.exposure * 1000))
+        self.exp_slider.setFixedWidth(75)
+        self.exp_slider.setToolTip("Exposure (f-stops). Click 'Ev' to reset.")
+        self.exp_slider.setStyleSheet(header_slider_style)
+
         self.lbl_exp_val = QtWidgets.QLabel(f"{self.exposure:+.2f}")
         self.lbl_exp_val.setFixedWidth(35)
-        self.lbl_exp_val.setStyleSheet("color: #ccc; font-family: consolas, monospace; font-size: 11px;")
-        
+        self.lbl_exp_val.setStyleSheet("color: #0a84ff; font-family: Consolas, monospace; font-size: 11px; font-weight: bold;")
+
         self.exp_slider.valueChanged.connect(self._on_exposure_changed)
-        
+
         exp_box = QtWidgets.QHBoxLayout()
         exp_box.setSpacing(2)
-        btn_e = QtWidgets.QPushButton("E")
-        btn_e.setFixedSize(16, 16)
-        btn_e.setStyleSheet("background: #444; color: white; border-radius: 8px; font-weight: bold; font-size: 9px;")
+        btn_e = QtWidgets.QPushButton("Ev")
+        btn_e.setToolTip("Reset Exposure to +0.00")
+        btn_e.setStyleSheet(header_reset_btn_style)
+        btn_e.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         btn_e.clicked.connect(self._reset_exposure)
         exp_box.addWidget(btn_e)
         exp_box.addWidget(self.exp_slider)
         exp_box.addWidget(self.lbl_exp_val)
         vc_layout.addLayout(exp_box)
-        
+
         # Gamma
         self.gam_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.gam_slider.setRange(100, 4000) # Maps to 0.1 to 4.0
+        self.gam_slider.setRange(100, 4000)
         self.gam_slider.setValue(int(self.gamma * 1000))
-        self.gam_slider.setFixedWidth(80) # Narrower
-        self.gam_slider.setToolTip("Gamma. Click 'G' to reset.")
-        self.gam_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                border: 1px solid #555;
-                height: 4px;
-                background: #333;
-                margin: 2px 0;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal {
-                background: #bbb;
-                border: 1px solid #777;
-                width: 10px;
-                height: 14px;
-                margin: -6px 0;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #ddd;
-            }
-        """)
-        
+        self.gam_slider.setFixedWidth(75)
+        self.gam_slider.setToolTip("Gamma. Click 'γ' to reset.")
+        self.gam_slider.setStyleSheet(header_slider_style)
+
         self.lbl_gam_val = QtWidgets.QLabel(f"{self.gamma:.2f}")
         self.lbl_gam_val.setFixedWidth(30)
-        self.lbl_gam_val.setStyleSheet("color: #ccc; font-family: consolas, monospace; font-size: 11px;")
-        
+        self.lbl_gam_val.setStyleSheet("color: #0a84ff; font-family: Consolas, monospace; font-size: 11px; font-weight: bold;")
+
         self.gam_slider.valueChanged.connect(self._on_gamma_changed)
-        
+
         gam_box = QtWidgets.QHBoxLayout()
         gam_box.setSpacing(2)
-        btn_g = QtWidgets.QPushButton("G")
-        btn_g.setFixedSize(16, 16)
-        btn_g.setStyleSheet("background: #444; color: white; border-radius: 8px; font-weight: bold; font-size: 9px;")
+        btn_g = QtWidgets.QPushButton("γ")
+        btn_g.setToolTip("Reset Gamma to 1.00")
+        btn_g.setStyleSheet(header_reset_btn_style)
+        btn_g.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         btn_g.clicked.connect(self._reset_gamma)
         gam_box.addWidget(btn_g)
         gam_box.addWidget(self.gam_slider)
         gam_box.addWidget(self.lbl_gam_val)
         vc_layout.addLayout(gam_box)
-        
-        vc_layout.addSpacing(5)
-        
-        lbl = QtWidgets.QLabel("V:") # Shortened from "Viewer:"
-        lbl.setStyleSheet("color: #888;") 
+
+        vc_layout.addSpacing(4)
+
+        lbl = QtWidgets.QLabel("V:")
+        lbl.setStyleSheet("color: #0a84ff; font-weight: bold; font-size: 11px;")
         vc_layout.addWidget(lbl)
-        
+
         self.viewer_combo = QtWidgets.QComboBox()
-        self.viewer_combo.setMinimumWidth(100) # Narrower
+        self.viewer_combo.setMinimumWidth(110)
         self.viewer_combo.setMaximumWidth(150)
-        self.viewer_combo.setStyleSheet("""
-            QComboBox { 
-                background-color: #333; 
-                color: #ddd; 
-                border: 1px solid #555; 
-                border-radius: 3px;
-                padding: 2px 5px;
-            }
-            QComboBox::drop-down { border: none; }
-            QComboBox::down-arrow { 
-                image: none; 
-                border-left: 5px solid transparent;
-                border-right: 5px solid transparent;
-                border-top: 5px solid #aaa;
-                margin-right: 5px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #333;
-                color: #ddd;
-                selection-background-color: #555;
-            }
-        """)
+        self.viewer_combo.setStyleSheet(header_combo_style)
         self.viewer_combo.addItems(self.color_manager.view_choices)
         if self.color_manager.output_cs in self.color_manager.view_choices:
             self.viewer_combo.setCurrentText(self.color_manager.output_cs)
         self.viewer_combo.currentTextChanged.connect(self._on_viewer_changed)
         vc_layout.addWidget(self.viewer_combo)
-        
-        # We will add this container to the menu bar using QWidgetAction
-        # Important: QWidgetAction needs the widget to be visible?
-        # self.viewer_container.show() # Not usually needed for actions, but let's see.
 
-        
         open_action = QtGui.QAction("Open Media...", self)
         open_action.setShortcut("Ctrl+O")
         open_action.triggered.connect(self._open_file)
         file_menu.addAction(open_action)
-        
+
         open_comp_action = QtGui.QAction("Open Compare Media...", self)
         open_comp_action.setShortcut("Ctrl+Shift+O")
         open_comp_action.triggered.connect(self._open_file_compare)
         file_menu.addAction(open_comp_action)
+
+        export_action = QtGui.QAction("Export / Convert Media...", self)
+        export_action.setShortcut("Ctrl+E")
+        export_action.triggered.connect(self._open_export_dialog)
+        file_menu.addAction(export_action)
+
+        file_menu.addSeparator()
+
+        save_frame_action = QtGui.QAction("Save Frame...", self)
+        save_frame_action.setShortcut("Ctrl+Shift+S")
+        save_frame_action.setToolTip("Save current frame as image (without annotations)")
+        save_frame_action.triggered.connect(self._save_current_frame)
+        file_menu.addAction(save_frame_action)
+
+        save_frame_annot_action = QtGui.QAction("Save Frame with Annotations...", self)
+        save_frame_annot_action.setToolTip("Save current frame with annotations baked in")
+        save_frame_annot_action.triggered.connect(self._save_frame_with_annotations)
+        file_menu.addAction(save_frame_annot_action)
+
+        file_menu.addSeparator()
+
+        save_annot_action = QtGui.QAction("Save Annotations...", self)
+        save_annot_action.setToolTip("Save all annotations to a JSON file")
+        save_annot_action.triggered.connect(self._save_annotations_to_file)
+        file_menu.addAction(save_annot_action)
+
+        load_annot_action = QtGui.QAction("Load Annotations...", self)
+        load_annot_action.setToolTip("Load annotations from a JSON file")
+        load_annot_action.triggered.connect(self._load_annotations_from_file)
+        file_menu.addAction(load_annot_action)
 
         file_menu.addSeparator()
 
         load_ocio_action = QtGui.QAction("Load OCIO Config...", self)
         load_ocio_action.triggered.connect(self._load_ocio_config_dialog)
         file_menu.addAction(load_ocio_action)
-        
+
         settings_action = QtGui.QAction("Settings...", self)
         settings_action.triggered.connect(self._open_settings_dialog)
         file_menu.addAction(settings_action)
-        
+
         file_menu.addSeparator()
-        
+
         exit_action = QtGui.QAction("Exit", self)
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
@@ -1018,29 +1224,33 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # View Menu
         view_menu = self.menuBar().addMenu("View")
-        
+
         self.side_action = QtGui.QAction("Side-by-Side", self)
         self.side_action.setCheckable(True)
         self.side_action.setShortcut("S")
         self.side_action.triggered.connect(lambda: self._set_compare_mode('side'))
         view_menu.addAction(self.side_action)
-        
+
         self.wipe_action = QtGui.QAction("Wipe", self)
         self.wipe_action.setCheckable(True)
         self.wipe_action.setShortcut("W")
         self.wipe_action.triggered.connect(lambda: self._set_compare_mode('wipe'))
         view_menu.addAction(self.wipe_action)
-        
+
         view_menu.addSeparator()
-        
+
         fit_action = QtGui.QAction("Fit to Window", self)
         fit_action.setShortcut("F")
         fit_action.triggered.connect(self.viewport.fit_to_window)
         view_menu.addAction(fit_action)
-        
+
+        metadata_action = QtGui.QAction("Show Metadata Panel...", self)
+        metadata_action.setShortcut("Ctrl+I")
+        metadata_action.triggered.connect(self._open_metadata_dialog)
+        view_menu.addAction(metadata_action)
+
         view_menu.addSeparator()
 
-        # View Mode Presets (MPC-HC Style)
         self.minimal_action = QtGui.QAction("Minimal View (Borderless)", self)
         self.minimal_action.setCheckable(True)
         self.minimal_action.setChecked(getattr(self, 'cinema_mode_enabled', True))
@@ -1063,18 +1273,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         view_menu.addSeparator()
 
-        view_menu.addSeparator()
-
         strategy_menu = view_menu.addMenu("Playback Strategy")
         self.strategy_group = QtGui.QActionGroup(self)
-        
+
         strategies = [
             ("Performance (Full Cache)", PlaybackStrategy.PERFORMANCE),
             ("Progressive (Sequential)", PlaybackStrategy.PROGRESSIVE),
             ("Stream Only (No RAM Cache)", PlaybackStrategy.STREAM),
             ("Read-behind Buffer", PlaybackStrategy.READ_BEHIND)
         ]
-        
+
         for label, strat in strategies:
             act = QtGui.QAction(label, self)
             act.setCheckable(True)
@@ -1085,7 +1293,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Playback Menu
         play_menu = self.menuBar().addMenu("Playback")
-        
+
         play_action = QtGui.QAction("Play/Pause", self)
         play_action.setShortcut("Space")
         play_action.triggered.connect(lambda: self.pause() if self.playing else self.play())
@@ -1094,53 +1302,12 @@ class MainWindow(QtWidgets.QMainWindow):
         stop_action = QtGui.QAction("Stop", self)
         stop_action.triggered.connect(self.stop)
         play_menu.addAction(stop_action)
-        
+
         # Add OCIO controls + Viewer Dropdown to Menu Bar (Corner Widget)
         if self.color_manager.config:
-            ocio_combo_style = """
-                QComboBox {
-                    background-color: #333;
-                    color: #ddd;
-                    border: 1px solid #555;
-                    border-radius: 3px;
-                    padding: 2px 5px;
-                    min-width: 120px;
-                }
-                QComboBox::drop-down { border: none; }
-                QComboBox::down-arrow {
-                    image: none;
-                    border-left: 4px solid transparent;
-                    border-right: 4px solid transparent;
-                    border-top: 4px solid #aaa;
-                    margin-right: 5px;
-                }
-                QComboBox QAbstractItemView {
-                    background-color: #333;
-                    color: #ddd;
-                    selection-background-color: #555;
-                }
-            """
-            ocio_btn_style = """
-                QPushButton {
-                    background-color: #333;
-                    color: #ddd;
-                    border: 1px solid #555;
-                    border-radius: 3px;
-                    padding: 3px 10px;
-                    font-weight: bold;
-                }
-                QPushButton:checked {
-                    background-color: #0078d4;
-                    border-color: #0078d4;
-                    color: white;
-                }
-                QPushButton:hover {
-                    background-color: #444;
-                }
-            """
-
             # OCIO toggle button
             self.ocio_btn = QtWidgets.QPushButton("OCIO")
+            self.ocio_btn.setObjectName("OCIOToggleBtn")
             self.ocio_btn.setCheckable(True)
             self.ocio_btn.setChecked(self.color_manager.ocio_enabled)
             self.ocio_btn.setStyleSheet(ocio_btn_style)
@@ -1149,28 +1316,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
             # Input colorspace
             in_lbl = QtWidgets.QLabel("In:")
-            in_lbl.setStyleSheet("color: #aaa;")
+            in_lbl.setStyleSheet("color: #0a84ff; font-weight: bold; font-size: 11px;")
             vc_layout.addWidget(in_lbl)
             self.ocio_input_combo = QtWidgets.QComboBox()
-            self.ocio_input_combo.setMaximumWidth(120) # Prevent it from pushing menus too far
+            self.ocio_input_combo.setMaximumWidth(125)
             self.ocio_input_combo.addItems(self.color_manager.input_choices)
             if self.color_manager.input_cs:
                 self.ocio_input_combo.setCurrentText(self.color_manager.input_cs)
             self.ocio_input_combo.currentTextChanged.connect(self._on_ocio_changed)
-            self.ocio_input_combo.setStyleSheet(ocio_combo_style)
+            self.ocio_input_combo.setStyleSheet(header_combo_style)
             vc_layout.addWidget(self.ocio_input_combo)
 
             # Output colorspace
             out_lbl = QtWidgets.QLabel("Out:")
-            out_lbl.setStyleSheet("color: #aaa;")
+            out_lbl.setStyleSheet("color: #0a84ff; font-weight: bold; font-size: 11px;")
             vc_layout.addWidget(out_lbl)
             self.ocio_output_combo = QtWidgets.QComboBox()
-            self.ocio_output_combo.setMaximumWidth(120)
+            self.ocio_output_combo.setMaximumWidth(125)
             self.ocio_output_combo.addItems(self.color_manager.output_choices)
             if self.color_manager.output_cs:
                 self.ocio_output_combo.setCurrentText(self.color_manager.output_cs)
             self.ocio_output_combo.currentTextChanged.connect(self._on_ocio_changed)
-            self.ocio_output_combo.setStyleSheet(ocio_combo_style)
+            self.ocio_output_combo.setStyleSheet(header_combo_style)
             vc_layout.addWidget(self.ocio_output_combo)
 
         self.menuBar().setCornerWidget(self.viewer_container, QtCore.Qt.Corner.TopRightCorner)
@@ -1347,46 +1514,343 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.lbl_probe.setText("")
 
-    def _toggle_draw_mode(self, enabled: bool):
+    # ─────────────────────────────────────────────────────────────────────
+    # Annotation / Drawing methods
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _wire_annotation_toolbar(self):
+        """Connect AnnotationToolbar signals to main window actions."""
+        tb = self.annotation_toolbar
+        tb.tool_changed.connect(self._on_annotation_tool_changed)
+        tb.color_changed.connect(self._on_annotation_color_changed)
+        tb.width_changed.connect(self._on_annotation_width_changed)
+        tb.undo_requested.connect(self._annotation_undo)
+        tb.redo_requested.connect(self._annotation_redo)
+        tb.clear_frame_requested.connect(self._clear_annotations)
+        tb.clear_all_requested.connect(self._clear_all_annotations)
+
+        self.viewport.stroke_finished.connect(self._on_stroke_finished)
+        if hasattr(self, 'viewport_b'):
+            self.viewport_b.stroke_finished.connect(self._on_stroke_finished)
+
+    def _toggle_annotate_mode(self, enabled: bool):
+        """Show/hide the annotation toolbar and enable/disable drawing on viewports."""
         self.viewport.is_drawing = enabled
         self.viewport_b.is_drawing = enabled
-        if enabled:
-            # Init color on first activation
-            self._change_draw_color(self.draw_color_combo.currentIndex())
-            # Ensure visual is updated
-            if self.core.frame_count():
-                strokes = self.annotations.get(self.current_index, [])
-                self.viewport.set_annotations(strokes)
-                if self.side_by_side and hasattr(self, 'viewport_b'):
-                    self.viewport_b.set_annotations(strokes)
 
-    def _change_draw_color(self, idx: int):
-        colors = {
-            0: (1.0, 0.0, 0.0, 1.0), # Red
-            1: (0.0, 1.0, 0.0, 1.0), # Green
-            2: (0.0, 0.0, 1.0, 1.0), # Blue
-            3: (1.0, 1.0, 0.0, 1.0)  # Yellow
-        }
-        color = colors.get(idx, (1.0, 0.0, 0.0, 1.0))
+        if enabled:
+            self.annotation_toolbar.show()
+            # Push current tool/color/width to viewports
+            self._on_annotation_tool_changed(self.annotation_toolbar.current_tool())
+            self._on_annotation_color_changed(self.annotation_toolbar.current_color())
+            self._on_annotation_width_changed(self.annotation_toolbar.current_width())
+            # Refresh annotation display
+            self._refresh_annotation_display()
+        else:
+            self.annotation_toolbar.hide()
+            # Clear visual overlays when exiting annotation mode
+            self.viewport.set_annotations([])
+            if hasattr(self, 'viewport_b'):
+                self.viewport_b.set_annotations([])
+
+        # Update undo/redo button states
+        self._update_annotation_undo_redo_ui()
+
+    def _on_annotation_tool_changed(self, tool: str):
+        if hasattr(self, 'viewport'):
+            self.viewport.finish_text_input()
+            self.viewport.draw_tool = tool
+        if hasattr(self, 'viewport_b'):
+            self.viewport_b.finish_text_input()
+            self.viewport_b.draw_tool = tool
+
+    def _on_annotation_color_changed(self, color: tuple):
         self.viewport.draw_color = color
         self.viewport_b.draw_color = color
 
-    def _on_stroke_finished(self, points: list, color: tuple):
-        if self.current_index not in self.annotations:
-            self.annotations[self.current_index] = []
-        
-        # Store stroke data
-        self.annotations[self.current_index].append({
-            'points': points,
-            'color': color
-        })
+    def _on_annotation_width_changed(self, width: int):
+        self.viewport.draw_width = width
+        self.viewport_b.draw_width = width
+
+    def _on_stroke_finished(self, stroke: dict):
+        """Receive a finished stroke dict from the viewport and record it."""
+        tool = stroke.get('tool', 'pen')
+
+        if tool == 'eraser':
+            self._erase_stroke_near(stroke)
+            return
+
+        idx = self.current_index
+
+        # Push current state to undo stack before modifying
+        current = list(self.annotations.get(idx, []))
+        self._annotation_undo_stack.setdefault(idx, []).append(current)
+        # Clear redo stack on new action
+        self._annotation_redo_stack[idx] = []
+
+        if idx not in self.annotations:
+            self.annotations[idx] = []
+        self.annotations[idx].append(stroke)
+
+        self._update_annotation_undo_redo_ui()
+
+    def _erase_stroke_near(self, eraser_stroke: dict):
+        """Remove the topmost stroke that is close to the eraser position."""
+        idx = self.current_index
+        strokes = self.annotations.get(idx, [])
+        if not strokes:
+            return
+
+        pts = eraser_stroke.get('points', [])
+        if not pts:
+            return
+        ex, ey = pts[0]
+        width = eraser_stroke.get('width', 3)
+        thresh_sq = (max(width * 4.0, 35.0)) ** 2
+
+        def _point_to_segment_dist_sq(px, py, x0, y0, x1, y1):
+            dx, dy = x1 - x0, y1 - y0
+            l2 = dx*dx + dy*dy
+            if l2 == 0:
+                return (px - x0)**2 + (py - y0)**2
+            t = max(0.0, min(1.0, ((px - x0)*dx + (py - y0)*dy) / l2))
+            return (px - (x0 + t*dx))**2 + (py - (y0 + t*dy))**2
+
+        # Find topmost (last) stroke within threshold
+        for i in range(len(strokes) - 1, -1, -1):
+            s = strokes[i]
+            tool = s.get('tool', 'pen')
+            s_pts = s.get('points', [])
+            s_pts2 = s.get('points2')
+            hit = False
+
+            if tool == 'text':
+                if s_pts:
+                    tx, ty = s_pts[0]
+                    txt_len = len(s.get('text', ''))
+                    text_thresh_sq = (max(width * 4.0, 40.0 + txt_len * 12.0)) ** 2
+                    if (ex - tx)**2 + (ey - ty)**2 <= text_thresh_sq:
+                        hit = True
+            else:
+                for pts_list in (s_pts, s_pts2):
+                    if not pts_list or len(pts_list) < 2:
+                        continue
+                    for k in range(len(pts_list) - 1):
+                        x0, y0 = pts_list[k][:2]
+                        x1, y1 = pts_list[k+1][:2]
+                        if _point_to_segment_dist_sq(ex, ey, x0, y0, x1, y1) <= thresh_sq:
+                            hit = True
+                            break
+                    if hit:
+                        break
+
+            if hit:
+                # Save undo snapshot
+                current = list(strokes)
+                self._annotation_undo_stack.setdefault(idx, []).append(current)
+                self._annotation_redo_stack[idx] = []
+                # Remove stroke
+                self.annotations[idx].pop(i)
+                self._refresh_annotation_display()
+                self._update_annotation_undo_redo_ui()
+                return
+
+    def _annotation_undo(self):
+        """Undo the last annotation action on the current frame."""
+        idx = self.current_index
+        stack = self._annotation_undo_stack.get(idx, [])
+        if not stack:
+            return
+        # Save current state to redo
+        self._annotation_redo_stack.setdefault(idx, []).append(
+            list(self.annotations.get(idx, []))
+        )
+        # Restore
+        prev = stack.pop()
+        self.annotations[idx] = prev
+        self._refresh_annotation_display()
+        self._update_annotation_undo_redo_ui()
+
+    def _annotation_redo(self):
+        """Redo the last undone annotation action on the current frame."""
+        idx = self.current_index
+        stack = self._annotation_redo_stack.get(idx, [])
+        if not stack:
+            return
+        # Save current state to undo
+        self._annotation_undo_stack.setdefault(idx, []).append(
+            list(self.annotations.get(idx, []))
+        )
+        nxt = stack.pop()
+        self.annotations[idx] = nxt
+        self._refresh_annotation_display()
+        self._update_annotation_undo_redo_ui()
+
+    def _update_annotation_undo_redo_ui(self):
+        """Sync undo/redo button enabled state in the toolbar."""
+        if not hasattr(self, 'annotation_toolbar'):
+            return
+        idx = self.current_index
+        has_undo = bool(self._annotation_undo_stack.get(idx))
+        has_redo = bool(self._annotation_redo_stack.get(idx))
+        self.annotation_toolbar.set_undo_enabled(has_undo)
+        self.annotation_toolbar.set_redo_enabled(has_redo)
+
+    def _refresh_annotation_display(self):
+        """Redraw current frame annotations in the viewports."""
+        strokes = self.annotations.get(self.current_index, [])
+        self.viewport.set_annotations(strokes)
+        if self.side_by_side and hasattr(self, 'viewport_b'):
+            self.viewport_b.set_annotations(strokes)
 
     def _clear_annotations(self):
-        if self.current_index in self.annotations:
-            del self.annotations[self.current_index]
+        """Clear annotations for the current frame (used by toolbar Clear Frame)."""
+        idx = self.current_index
+        if idx in self.annotations:
+            # Save to undo before clearing
+            self._annotation_undo_stack.setdefault(idx, []).append(
+                list(self.annotations[idx])
+            )
+            self._annotation_redo_stack[idx] = []
+            del self.annotations[idx]
             self.viewport.set_annotations([])
             if self.side_by_side and hasattr(self, 'viewport_b'):
                 self.viewport_b.set_annotations([])
+            self._update_annotation_undo_redo_ui()
+
+    def _clear_all_annotations(self):
+        """Clear annotations on ALL frames."""
+        self.annotations.clear()
+        self._annotation_undo_stack.clear()
+        self._annotation_redo_stack.clear()
+        self.viewport.set_annotations([])
+        if hasattr(self, 'viewport_b'):
+            self.viewport_b.set_annotations([])
+        self._update_annotation_undo_redo_ui()
+
+    # ─────────────────────────────────────────────────────────────────────
+    # File menu: Save Frame / Annotations
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _save_current_frame(self):
+        """Save the current frame as PNG/JPG/EXR (without annotations)."""
+        if not self.core.frame_count():
+            QtWidgets.QMessageBox.warning(self, "No Media", "No media loaded.")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save Frame", "",
+            "PNG Image (*.png);;JPEG Image (*.jpg);;OpenEXR (*.exr);;All Files (*)"
+        )
+        if not path:
+            return
+        self._do_save_frame(path, with_annotations=False)
+
+    def _save_frame_with_annotations(self):
+        """Save the current frame with annotations baked in."""
+        if not self.core.frame_count():
+            QtWidgets.QMessageBox.warning(self, "No Media", "No media loaded.")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save Frame with Annotations", "",
+            "PNG Image (*.png);;JPEG Image (*.jpg);;All Files (*)"
+        )
+        if not path:
+            return
+        self._do_save_frame(path, with_annotations=True)
+
+    def _do_save_frame(self, path: str, with_annotations: bool = False):
+        """Internal: save current frame to disk, optionally with annotations baked."""
+        import traceback
+        try:
+            ext = os.path.splitext(path)[1].lower()
+
+            if with_annotations:
+                # Use VisPy canvas.render() to capture the GPU scene
+                arr = self.viewport.get_frame_with_annotations()
+                if arr is None:
+                    QtWidgets.QMessageBox.critical(self, "Save Failed", "Could not capture viewport.")
+                    return
+                # arr is uint8 RGB/RGBA numpy array
+                h, w = arr.shape[:2]
+                c = arr.shape[2] if len(arr.shape) > 2 else 3
+                fmt = QtGui.QImage.Format.Format_RGB888 if c == 3 else QtGui.QImage.Format.Format_RGBA8888
+                image = QtGui.QImage(arr.tobytes(), w, h, w * c, fmt)
+                if not image.save(path):
+                    QtWidgets.QMessageBox.critical(self, "Save Failed", f"Could not save: {path}")
+                    return
+            else:
+                frame_raw = self.core.get_frame(self.current_index)
+                if frame_raw is None:
+                    QtWidgets.QMessageBox.critical(self, "Save Failed", "Frame not available.")
+                    return
+
+                if ext == '.exr':
+                    try:
+                        import imageio
+                        imageio.imwrite(path, frame_raw)
+                    except Exception as e:
+                        QtWidgets.QMessageBox.critical(self, "Save Failed", f"EXR save error: {e}")
+                        return
+                else:
+                    # Convert float32 to uint8 if needed
+                    if frame_raw.dtype == np.float32:
+                        arr = np.clip(frame_raw * 255, 0, 255).astype(np.uint8)
+                    else:
+                        arr = frame_raw.astype(np.uint8)
+
+                    if arr.shape[2] == 3:
+                        h, w = arr.shape[:2]
+                        image = QtGui.QImage(arr.data, w, h, w * 3, QtGui.QImage.Format.Format_RGB888)
+                    else:
+                        h, w = arr.shape[:2]
+                        image = QtGui.QImage(arr.data, w, h, w * 4, QtGui.QImage.Format.Format_RGBA8888)
+
+                    if not image.save(path):
+                        QtWidgets.QMessageBox.critical(self, "Save Failed", f"Could not save: {path}")
+                        return
+
+            self._update_status(f"Saved: {os.path.basename(path)}")
+        except Exception:
+            QtWidgets.QMessageBox.critical(self, "Save Error", traceback.format_exc())
+
+    def _save_annotations_to_file(self):
+        """Serialise self.annotations to a JSON file."""
+        if not self.annotations:
+            QtWidgets.QMessageBox.information(self, "No Annotations", "There are no annotations to save.")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save Annotations", "", "Annotation Files (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            # Convert int keys to strings for JSON
+            data = {str(k): v for k, v in self.annotations.items()}
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+            self._update_status(f"Annotations saved: {os.path.basename(path)}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Save Error", str(e))
+
+    def _load_annotations_from_file(self):
+        """Load annotations from a JSON file."""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Annotations", "", "Annotation Files (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # Restore int keys
+            self.annotations = {int(k): v for k, v in data.items()}
+            self._annotation_undo_stack.clear()
+            self._annotation_redo_stack.clear()
+            self._refresh_annotation_display()
+            self._update_annotation_undo_redo_ui()
+            self._update_status(f"Annotations loaded: {os.path.basename(path)}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Load Error", str(e))
 
     # Reset methods redefined above
 
@@ -1601,6 +2065,26 @@ class MainWindow(QtWidgets.QMainWindow):
             # 7. Defaults (applied on next load)
             
             self._save_prefs()
+
+    def _open_export_dialog(self):
+        if not self.core.media:
+            QtWidgets.QMessageBox.warning(self, "No Media", "Please load a sequence or video first.")
+            return
+        dlg = ExportDialog(self, self.core)
+        dlg.exec()
+
+    def _open_metadata_dialog(self):
+        if not self.core.media:
+            QtWidgets.QMessageBox.warning(self, "No Media", "Please load a sequence or video first.")
+            return
+            
+        if not hasattr(self, 'metadata_dialog') or not self.metadata_dialog:
+            self.metadata_dialog = MetadataDialog(self, self.core)
+            
+        self.metadata_dialog.update_metadata(self.current_index)
+        self.metadata_dialog.show()
+        self.metadata_dialog.raise_()
+        self.metadata_dialog.activateWindow()
 
     # ---------- Core Actions ----------
     def load_media(self, path: str):
@@ -1854,10 +2338,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.frame_slider.blockSignals(False)
         self.current_index = index
         
-        # Apply annotations if drawing is enabled
-        if self.btn_draw.isChecked():
+        # Apply annotations when annotation mode is active
+        if getattr(self, 'btn_annotate', None) and self.btn_annotate.isChecked():
             strokes = self.annotations.get(index, [])
             self.viewport.set_annotations(strokes)
+
+        # Update undo/redo button states for new frame
+        self._update_annotation_undo_redo_ui()
+
+        # Update metadata dialog dynamically if open
+        if hasattr(self, 'metadata_dialog') and self.metadata_dialog and self.metadata_dialog.isVisible():
+            if self.metadata_dialog.dynamic_update_checkbox.isChecked():
+                self.metadata_dialog.update_metadata(index)
  
         if self.compare_loaded and self.core_b.frame_count() > 0:
             idx_b = max(0, min(self.core_b.frame_count() - 1, index + int(getattr(self, 'compare_offset', 0))))
@@ -1876,7 +2368,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.viewport.set_exposure(self.exposure)
                     self.viewport.set_gamma(self.gamma)
                     self.viewport.set_channel_mode(self.channel_mode)
-            if self.btn_draw.isChecked() and self.side_by_side:
+            if getattr(self, 'btn_annotate', None) and self.btn_annotate.isChecked() and self.side_by_side:
+                strokes = self.annotations.get(index, [])
                 self.viewport_b.set_annotations(strokes)
 
 
@@ -2381,9 +2874,33 @@ class MainWindow(QtWidgets.QMainWindow):
             self.load_media(target)
             self.play()  # Auto-play on navigation
 
+    def _wire_annotation_toolbar(self):
+        """Connect annotation toolbar signals. Called after toolbar is created."""
+        tb = self.annotation_toolbar
+        tb.tool_changed.connect(self._on_annotation_tool_changed)
+        tb.color_changed.connect(self._on_annotation_color_changed)
+        tb.width_changed.connect(self._on_annotation_width_changed)
+        tb.undo_requested.connect(self._annotation_undo)
+        tb.redo_requested.connect(self._annotation_redo)
+        tb.clear_frame_requested.connect(self._clear_annotations)
+        tb.clear_all_requested.connect(self._clear_all_annotations)
+        # Note: viewport.stroke_finished is already connected in __init__
+
+
     # ---------- Keyboard Shortcuts ----------
     def keyPressEvent(self, event: QtGui.QKeyEvent):  # type: ignore[override]
         key = event.key()
+        mods = event.modifiers()
+
+        # Ctrl+Z — annotation undo
+        if key == QtCore.Qt.Key.Key_Z and (mods & QtCore.Qt.KeyboardModifier.ControlModifier):
+            if mods & QtCore.Qt.KeyboardModifier.ShiftModifier:
+                self._annotation_redo()
+            else:
+                self._annotation_undo()
+            event.accept()
+            return
+
         if key == QtCore.Qt.Key.Key_Escape:
             self.close()
             event.accept()
