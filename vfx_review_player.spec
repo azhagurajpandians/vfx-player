@@ -7,7 +7,11 @@ sys.setrecursionlimit(5000)
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_all
 
-datas = [('configs\\ocio\\config.ocio', 'configs\\ocio')]
+datas = [
+    ('configs', 'configs'),
+    ('core', 'core'),
+    ('gui', 'gui')
+]
 binaries = []
 
 # Collect cv2, numpy, imageio, and vispy resources
@@ -61,7 +65,7 @@ hiddenimports = list(set(cv2_hiddenimports + np_hiddenimports + imgio_hiddenimpo
 
 a = Analysis(
     ['main.py'],
-    pathex=[],
+    pathex=['.'],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

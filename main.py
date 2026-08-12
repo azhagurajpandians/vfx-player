@@ -1,7 +1,18 @@
-"""VFXPlayer application entry point."""
-
 import os
 import sys
+
+# Ensure sys.stdout and sys.stderr are valid stream objects (PyInstaller noconsole sets them to None)
+class DummyStream:
+    def write(self, data): pass
+    def flush(self): pass
+
+if sys.stdout is None:
+    sys.stdout = DummyStream()
+if sys.stderr is None:
+    sys.stderr = DummyStream()
+
+import warnings
+warnings.filterwarnings("ignore")
 
 # CRITICAL: Fix for OpenImageIO/OCIO delay-loaded dependencies
 # These libraries use LoadLibrary() which doesn't check the application directory by default on Python 3.8+
