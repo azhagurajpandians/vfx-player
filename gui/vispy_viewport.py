@@ -26,12 +26,28 @@ vec4 apply_grading(vec4 color) {
             top_color = texture2D($texture_b, tc);
         }
     }
+    
+    // 1. Exposure (Master Gain)
     float gain = pow(2.0, $exposure);
     top_color.rgb *= gain;
-    top_color.rgb = max(top_color.rgb, 0.0);
+    
+    // 2. ASC CDL Slope & Offset
+    top_color.rgb = (top_color.rgb * $slope) + $offset;
+    top_color.rgb = max(top_color.rgb, vec3(0.0));
+    
+    // 3. ASC CDL Power
+    top_color.rgb = pow(top_color.rgb, $power);
+    
+    // 4. ASC CDL Saturation
+    float luma = dot(top_color.rgb, vec3(0.2126, 0.7152, 0.0722));
+    top_color.rgb = vec3(luma) + $saturation * (top_color.rgb - vec3(luma));
+    
+    // 5. Gamma
     if ($gamma > 0.01) {
         top_color.rgb = pow(top_color.rgb, vec3(1.0 / $gamma));
     }
+    
+    // 6. Channel Isolation
     if ($channel_mode == 1) {
         top_color.rgb = vec3(top_color.r);
     } else if ($channel_mode == 2) {
@@ -54,6 +70,10 @@ class GradedWipeImageVisual(ImageVisual):
         self._grading_fn['channel_mode'] = 0
         self._grading_fn['wipe_ratio'] = 0.5
         self._grading_fn['wipe_enabled'] = 0
+        self._grading_fn['slope'] = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+        self._grading_fn['offset'] = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        self._grading_fn['power'] = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+        self._grading_fn['saturation'] = 1.0
         self._texture_b = GPUScaledTexture2D(data=np.zeros((1, 1, 3), dtype=np.uint8), internalformat='auto')
         self._grading_fn['texture_b'] = self._texture_b
         super().__init__(*args, **kwargs)
@@ -226,11 +246,12 @@ class VispyViewport(QtWidgets.QWidget):
         self.setAcceptDrops(True)
         self.setMouseTracking(True)
         
-        self.canvas = scene.SceneCanvas(keys='interactive', show=False, parent=self)
+        self.canvas = scene.SceneCanvas(keys=None, show=False, parent=self)
         self.view = self.canvas.central_widget.add_view()
         self.view.camera = 'panzoom'
         self.view.camera.aspect = 1.0
         self.view.camera.set_range(margin=0)
+        self.view.camera.viewbox_key_event = lambda event: None
         
         # Image visual
         self.image_visual = GradedWipeImage(
@@ -269,6 +290,12 @@ class VispyViewport(QtWidgets.QWidget):
 
         self._last_shape = None
         self._zoom = 1.0
+        self._show_guides = False
+        self._show_guide_center = True
+        self._show_guide_thirds = True
+        self._show_guide_action = True
+        self._show_guide_title = True
+        self._guide_visuals = []
         
         # Wire up click detection and canvas mouse events
         self._init_click_detection()
@@ -281,7 +308,11 @@ class VispyViewport(QtWidgets.QWidget):
     # ─────────────────────────────────────────────────────────────
 
     def _on_canvas_key_press(self, event):
-        """Consume Esc key at the VisPy level to prevent default behavior."""
+        """Consume Esc key at the VisPy level to prevent default behavior, and block Backspace from camera reset."""
+        if self._text_input is not None or event.key in ('Backspace', 'backspace'):
+            event.handled = True
+            return
+
         if event.key == 'Escape':
             if self.main_window:
                 QtCore.QTimer.singleShot(0, self.main_window.close)
@@ -315,6 +346,89 @@ class VispyViewport(QtWidgets.QWidget):
     def set_channel_mode(self, mode: str):
         mapping = {'RGB': 0, 'R': 1, 'G': 2, 'B': 3, 'A': 4}
         self.image_visual._grading_fn['channel_mode'] = mapping.get(mode, 0)
+        self.canvas.update()
+
+    def set_cdl_params(self, slope: tuple, offset: tuple, power: tuple, saturation: float):
+        self.image_visual._grading_fn['slope'] = np.array(slope, dtype=np.float32)
+        self.image_visual._grading_fn['offset'] = np.array(offset, dtype=np.float32)
+        self.image_visual._grading_fn['power'] = np.array(power, dtype=np.float32)
+        self.image_visual._grading_fn['saturation'] = float(saturation)
+        self.canvas.update()
+
+    def set_guides_enabled(self, enabled: bool):
+        self._show_guides = enabled
+        self._update_safe_guides()
+
+    def set_guides_config(self, center: bool, thirds: bool, action: bool, title: bool):
+        self._show_guide_center = center
+        self._show_guide_thirds = thirds
+        self._show_guide_action = action
+        self._show_guide_title = title
+        self._update_safe_guides()
+
+    def _update_safe_guides(self):
+        if hasattr(self, '_guide_visuals'):
+            for vis in self._guide_visuals:
+                try:
+                    vis.parent = None
+                except Exception:
+                    pass
+        self._guide_visuals = []
+
+        if not getattr(self, '_show_guides', False) or self._last_shape is None:
+            return
+
+        h, w = self._last_shape
+        color = (0.2, 0.8, 0.2, 0.4) 
+        color_cross = (0.8, 0.2, 0.2, 0.5) 
+        width = 1.0
+
+        if getattr(self, '_show_guide_center', True):
+            cross_pts = np.array([
+                [w / 2.0, h * 0.46, 0], [w / 2.0, h * 0.54, 0],
+                [w * 0.47, h / 2.0, 0], [w * 0.53, h / 2.0, 0]
+            ], dtype=np.float32)
+            v_line = visuals.Line(pos=cross_pts[:2], color=color_cross, width=width, parent=self.view.scene)
+            h_line = visuals.Line(pos=cross_pts[2:], color=color_cross, width=width, parent=self.view.scene)
+            v_line.order = 8
+            h_line.order = 8
+            self._guide_visuals.extend([v_line, h_line])
+
+        if getattr(self, '_show_guide_thirds', True):
+            x1, x2 = w / 3.0, 2.0 * w / 3.0
+            y1, y2 = h / 3.0, 2.0 * h / 3.0
+            t1 = visuals.Line(pos=np.array([[x1, 0, 0], [x1, h, 0]], dtype=np.float32), color=color, width=width, parent=self.view.scene)
+            t2 = visuals.Line(pos=np.array([[x2, 0, 0], [x2, h, 0]], dtype=np.float32), color=color, width=width, parent=self.view.scene)
+            t3 = visuals.Line(pos=np.array([[0, y1, 0], [w, y1, 0]], dtype=np.float32), color=color, width=width, parent=self.view.scene)
+            t4 = visuals.Line(pos=np.array([[0, y2, 0], [w, y2, 0]], dtype=np.float32), color=color, width=width, parent=self.view.scene)
+            for t in (t1, t2, t3, t4):
+                t.order = 8
+                self._guide_visuals.append(t)
+
+        if getattr(self, '_show_guide_action', True):
+            ax1, ax2 = 0.05 * w, 0.95 * w
+            ay1, ay2 = 0.05 * h, 0.95 * h
+            rect = np.array([
+                [ax1, ay1, 0], [ax2, ay1, 0],
+                [ax2, ay2, 0], [ax1, ay2, 0],
+                [ax1, ay1, 0]
+            ], dtype=np.float32)
+            act_line = visuals.Line(pos=rect, color=color, width=width, parent=self.view.scene)
+            act_line.order = 8
+            self._guide_visuals.append(act_line)
+
+        if getattr(self, '_show_guide_title', True):
+            tx1, tx2 = 0.10 * w, 0.90 * w
+            ty1, ty2 = 0.10 * h, 0.90 * h
+            rect = np.array([
+                [tx1, ty1, 0], [tx2, ty1, 0],
+                [tx2, ty2, 0], [tx1, ty2, 0],
+                [tx1, ty1, 0]
+            ], dtype=np.float32)
+            tit_line = visuals.Line(pos=rect, color=color, width=width, parent=self.view.scene)
+            tit_line.order = 8
+            self._guide_visuals.append(tit_line)
+            
         self.canvas.update()
 
     # ─────────────────────────────────────────────────────────────
@@ -626,9 +740,7 @@ class VispyViewport(QtWidgets.QWidget):
                 self._all_stroke_visuals.append(vis2)
 
         elif tool == 'text':
-            # Text is handled by the text overlay widget, not VisPy visuals
-            # (already added via _commit_text_stroke)
-            pass
+            self._render_text_visual(stroke)
 
     # ─────────────────────────────────────────────────────────────
     # Eraser tool
@@ -687,19 +799,38 @@ class VispyViewport(QtWidgets.QWidget):
         self._text_input.returnPressed.connect(self._finish_text_input)
         self._text_input.installEventFilter(self)
 
+    def _cancel_text_input(self):
+        """Cancel active text input without committing text."""
+        widget = self._text_input
+        self._text_input = None
+        self._text_scene_pos = None
+        if widget is not None:
+            try:
+                widget.removeEventFilter(self)
+            except Exception:
+                pass
+            widget.hide()
+            widget.deleteLater()
+
     def finish_text_input(self):
         """Public API to commit any open text input widget."""
         self._finish_text_input()
 
     def _finish_text_input(self):
         """Commit the typed text as an annotation stroke."""
-        if self._text_input is None:
+        widget = self._text_input
+        if widget is None:
             return
 
-        text = self._text_input.text().strip()
-        self._text_input.hide()
-        self._text_input.deleteLater()
         self._text_input = None
+        try:
+            widget.removeEventFilter(self)
+        except Exception:
+            pass
+        
+        text = widget.text().strip()
+        widget.hide()
+        widget.deleteLater()
 
         if text and hasattr(self, '_text_scene_pos') and self._text_scene_pos:
             x, y = self._text_scene_pos
@@ -713,6 +844,7 @@ class VispyViewport(QtWidgets.QWidget):
             }
             # Render the text visual
             self._render_text_visual(stroke)
+            self.canvas.update()
             self.stroke_finished.emit(stroke)
 
         self._text_scene_pos = None
@@ -726,40 +858,46 @@ class VispyViewport(QtWidgets.QWidget):
         if not pts or not text:
             return
         x, y = pts[0]
-        font_size = max(10, width * 4)
+        # Calculate legible font size based on annotation width setting
+        font_size = max(14, width * 5)
         try:
             vis = visuals.Text(
                 text=text,
                 color=color,
                 font_size=font_size,
-                pos=(x, y),
+                pos=(x, y, 0),
                 parent=self.view.scene,
                 anchor_x='left',
                 anchor_y='top',
             )
-            vis.order = 11
+            vis.order = 15
             vis.set_gl_state('translucent', depth_test=False)
             self._all_stroke_visuals.append(vis)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Text Visual Error] {e}")
 
     def eventFilter(self, obj, event):
-        """Catch Escape, FocusOut, or Return on the text input widget to commit or cancel it."""
+        """Catch Escape, FocusOut, or Return on the text input widget to commit or cancel it, and consume all keys."""
         if self._text_input is not None and obj is self._text_input:
             if event.type() == QtCore.QEvent.Type.FocusOut:
                 self._finish_text_input()
                 return True
-            elif event.type() == QtCore.QEvent.Type.KeyPress:
-                if event.key() == QtCore.Qt.Key.Key_Escape:
-                    # Cancel text input without committing
-                    self._text_input.hide()
-                    self._text_input.deleteLater()
-                    self._text_input = None
-                    self._text_scene_pos = None
-                    return True
-                elif event.key() in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
-                    self._finish_text_input()
-                    return True
+            elif event.type() in (QtCore.QEvent.Type.KeyPress, QtCore.QEvent.Type.KeyRelease):
+                if event.type() == QtCore.QEvent.Type.KeyPress:
+                    if event.key() == QtCore.Qt.Key.Key_Escape:
+                        self._cancel_text_input()
+                        return True
+                    elif event.key() in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                        self._finish_text_input()
+                        return True
+                
+                # Temporarily remove event filter to avoid recursion
+                self._text_input.removeEventFilter(self)
+                # Send the event directly to QLineEdit so it processes typing/backspace/etc. natively
+                QtWidgets.QApplication.sendEvent(self._text_input, event)
+                # Reinstall the event filter
+                self._text_input.installEventFilter(self)
+                return True
         return super().eventFilter(obj, event)
 
     # ─────────────────────────────────────────────────────────────
@@ -869,6 +1007,7 @@ class VispyViewport(QtWidgets.QWidget):
             self.image_visual.set_data(frame)
             self.image_visual.transform = scene.transforms.STTransform(scale=(1, -1, 1), translate=(0, h, 0))
             self.fit_to_window()
+            self._update_safe_guides()
             uploaded_pbo = True
         else:
             uploaded_pbo = False

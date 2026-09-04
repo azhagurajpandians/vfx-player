@@ -12,6 +12,7 @@ Architecture:
 import os
 import sys
 import glob
+import re
 import time
 import subprocess
 import shutil
@@ -24,6 +25,53 @@ import enum
 import av
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Any
+
+IMAGE_EXTENSIONS = {'.exr', '.sxr', '.tif', '.tiff', '.dpx', '.cin', '.png', '.jpg', '.jpeg', '.tga', '.bmp', '.webp'}
+VIDEO_EXTENSIONS = {'.mov', '.mp4', '.avi', '.mkv', '.mxf', '.webm', '.m4v', '.flv', '.ts'}
+
+def detect_image_sequence(file_path: str) -> List[str]:
+    """Detect an image sequence containing file_path using natural frame pattern matching.
+    
+    Matches common VFX naming conventions:
+      - name.0100.tif
+      - name_1001.png
+      - name-001.jpg
+      - name.0001.exr
+      - name0001.dpx
+    """
+    if not os.path.isfile(file_path):
+        return [file_path] if os.path.exists(file_path) else []
+
+    folder, filename = os.path.split(file_path)
+    base, ext = os.path.splitext(filename)
+    ext_lower = ext.lower()
+
+    if ext_lower not in IMAGE_EXTENSIONS:
+        return [file_path]
+
+    # Look for trailing digits at the end of the base name (e.g. shot.0100 -> 'shot.', '0100')
+    m = re.search(r'^(.*?)(\d+)$', base)
+    if not m:
+        return [file_path]
+
+    prefix = m.group(1)
+    pattern = re.compile(r'^' + re.escape(prefix) + r'(\d+)' + re.escape(ext) + r'$', re.IGNORECASE)
+
+    try:
+        matches = []
+        for entry in os.listdir(folder):
+            mat = pattern.match(entry)
+            if mat:
+                frame_num = int(mat.group(1))
+                matches.append((frame_num, os.path.join(folder, entry)))
+        if matches:
+            matches.sort(key=lambda x: x[0])
+            return [p for _, p in matches]
+    except OSError:
+        pass
+
+    return [file_path]
+
 
 class PlaybackStrategy(enum.Enum):
     PERFORMANCE = "performance"  # Full aggressive caching
@@ -61,15 +109,20 @@ def _find_ffmpeg():
     # Check bundled locations (order: most specific first)
     search_dirs = [
         os.path.join(app_dir, 'bin', 'ffmpeg', 'windows', 'bin'),
+        os.path.join(app_dir, 'bin', 'ffmpeg', 'bin'),
         os.path.join(app_dir, 'bin', 'ffmpeg'),
-        os.path.join(app_dir, 'ffmpeg'),
         os.path.join(app_dir, 'bin'),
+        os.path.join(app_dir, 'ffmpeg'),
+        os.path.join(app_dir, '.knacktools', 'bin', 'ffmpeg', 'windows', 'bin'),
+        os.path.join(app_dir, '.knacktools', 'ffmpeg', 'bin'),
+        os.path.join(app_dir, '.knacktools', 'bin'),
         app_dir,
     ]
 
     # .knacktools locations (production machines)
     home = os.path.expanduser('~')
     for root in [home, 'C:\\', 'D:\\', 'E:\\']:
+        search_dirs.append(os.path.join(root, '.knacktools', 'bin', 'ffmpeg', 'windows', 'bin'))
         search_dirs.append(os.path.join(root, '.knacktools', 'ffmpeg', 'bin'))
         search_dirs.append(os.path.join(root, '.knacktools', 'ffmpeg'))
         search_dirs.append(os.path.join(root, '.knacktools', 'bin'))
@@ -95,15 +148,20 @@ def _find_ffprobe():
 
     search_dirs = [
         os.path.join(app_dir, 'bin', 'ffmpeg', 'windows', 'bin'),
+        os.path.join(app_dir, 'bin', 'ffmpeg', 'bin'),
         os.path.join(app_dir, 'bin', 'ffmpeg'),
-        os.path.join(app_dir, 'ffmpeg'),
         os.path.join(app_dir, 'bin'),
+        os.path.join(app_dir, 'ffmpeg'),
+        os.path.join(app_dir, '.knacktools', 'bin', 'ffmpeg', 'windows', 'bin'),
+        os.path.join(app_dir, '.knacktools', 'ffmpeg', 'bin'),
+        os.path.join(app_dir, '.knacktools', 'bin'),
         app_dir,
     ]
 
     # .knacktools locations (production machines)
     home = os.path.expanduser('~')
     for root in [home, 'C:\\', 'D:\\', 'E:\\']:
+        search_dirs.append(os.path.join(root, '.knacktools', 'bin', 'ffmpeg', 'windows', 'bin'))
         search_dirs.append(os.path.join(root, '.knacktools', 'ffmpeg', 'bin'))
         search_dirs.append(os.path.join(root, '.knacktools', 'ffmpeg'))
         search_dirs.append(os.path.join(root, '.knacktools', 'bin'))
@@ -325,7 +383,12 @@ class FrameLoader:
         self._threads.append(t)
 
     def _is_video(self, path: str) -> bool:
-        return path.lower().endswith(('.mov', '.mp4', '.avi', '.mkv', '.mxf'))
+        ext = os.path.splitext(path)[1].lower()
+        if ext in VIDEO_EXTENSIONS:
+            return True
+        if ext in IMAGE_EXTENSIONS:
+            return False
+        return ext in ('.mov', '.mp4', '.avi', '.mkv', '.mxf', '.webm')
 
     def request(self, path: str, index: int, priority: int):
         if self.stopping:
@@ -337,14 +400,8 @@ class FrameLoader:
 
         item = (priority, time.time(), index, path)
         if self._is_video(path):
-            if priority == 0:
-                with self.lock:
-                    self._vid_queue = queue.PriorityQueue()
             self._vid_queue.put(item)
         else:
-            if priority == 0:
-                with self.lock:
-                    self._seq_queue = queue.PriorityQueue()
             self._seq_queue.put(item)
 
     def clear_pending(self):
@@ -470,36 +527,27 @@ class FrameLoader:
                             _ffmpeg_reader = None
                             continue
 
-                # --- Sequential read-ahead strategy ---
-                # Only seek if it's a backwards jump or a significant forward jump
-                # (Reading sequential through the pipe is faster than re-starting FFmpeg)
-                need_seek = (_next_seq_frame != index)
-                if not need_seek:
-                    pass # Already where we need to be
-                elif index > _next_seq_frame and index < _next_seq_frame + 24:
-                    # Minor forward jump? Just read-skip to keep the pipe alive
-                    need_seek = False
-                
                 frame = None
                 if _use_ffmpeg and _ffmpeg_reader:
+                    need_seek = (_next_seq_frame != index)
+                    if index > _next_seq_frame and index < _next_seq_frame + 24:
+                        need_seek = False
                     raw = _ffmpeg_reader.read_frame(index, _media_fps, seek=need_seek)
                     if raw is not None:
-                        # Keep as uint8 to save 4x bandwidth and memory
-                        # GPU handles normalization [0, 255] -> [0, 1]
                         frame = raw
                     _next_seq_frame = index + 1
                 elif _cap is not None and _cap.isOpened():
-                    if need_seek:
+                    # For OpenCV, if position does not match index, ALWAYS seek!
+                    # Never assume sequential position when index differs.
+                    if _next_seq_frame != index:
                         _cap.set(cv2.CAP_PROP_POS_FRAMES, index)
                     ret, bgr = _cap.read()
                     if ret:
-                        # Keep as uint8 (BGR -> RGB)
                         frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                     _next_seq_frame = index + 1
 
                 if frame is not None:
-                    # Cache the frame. Strategy handling is now in PlayerCore.get_frame
-                    # and cache pruning logic.
+                    # Cache the frame.
                     with self.cache_lock:
                         if index not in self.cache_ref:
                             self.cache_ref[index] = frame
@@ -507,44 +555,48 @@ class FrameLoader:
                     _next_seq_frame = index + 1
 
                     # --- Read-ahead burst ---
-                    # Only prefetch if NOT in STREAM mode
-                    if self.strategy != PlaybackStrategy.STREAM:
-                        for ahead in range(_next_seq_frame, _next_seq_frame + 16): 
-                            if self.session_id != _local_session or self.stopping:
-                                break
-                            with self.cache_lock:
-                                if ahead in self.cache_ref:
-                                    _next_seq_frame = ahead + 1
-                                    continue
-                            
-                            if _use_ffmpeg and _ffmpeg_reader:
-                                # Sequential read (no seek)
-                                raw = _ffmpeg_reader.read_frame(ahead, _media_fps, seek=False)
-                                if raw is not None:
-                                    # Always keep as uint8 for video burst
-                                    fr = raw
-                                        
-                                    with self.cache_lock:
-                                        self.cache_ref[ahead] = fr
-                                        # Enforce capacity in worker
-                                        while len(self.cache_ref) > self.cache_capacity:
-                                            self.cache_ref.popitem(last=False)
-                                    _next_seq_frame = ahead + 1
-                                else:
-                                    break
-                            elif _cap is not None and _cap.isOpened():
-                                ret, bgr = _cap.read()
-                                if not ret:
-                                    break
-                                # Keep as uint8
-                                fr = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    # In STREAM mode, use a 12-frame rolling buffer so 4K video maintains 24fps without stutter.
+                    # In other modes, use a 24-frame burst.
+                    burst_size = 12 if self.strategy == PlaybackStrategy.STREAM else 24
+                    for ahead in range(_next_seq_frame, _next_seq_frame + burst_size): 
+                        if self.session_id != _local_session or self.stopping:
+                            break
+                        # If a high-priority user request arrived, abort burst immediately!
+                        if not self._vid_queue.empty():
+                            break
+                        with self.cache_lock:
+                            if ahead in self.cache_ref:
+                                _next_seq_frame = ahead + 1
+                                continue
+                        
+                        if _use_ffmpeg and _ffmpeg_reader:
+                            # Sequential read (no seek)
+                            raw = _ffmpeg_reader.read_frame(ahead, _media_fps, seek=False)
+                            if raw is not None:
+                                # Always keep as uint8 for video burst
+                                fr = raw
                                     
                                 with self.cache_lock:
                                     self.cache_ref[ahead] = fr
-                                    # Enforce capacity
+                                    # Enforce capacity in worker
                                     while len(self.cache_ref) > self.cache_capacity:
                                         self.cache_ref.popitem(last=False)
                                 _next_seq_frame = ahead + 1
+                            else:
+                                break
+                        elif _cap is not None and _cap.isOpened():
+                            ret, bgr = _cap.read()
+                            if not ret:
+                                break
+                            # Keep as uint8
+                            fr = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                                
+                            with self.cache_lock:
+                                self.cache_ref[ahead] = fr
+                                # Enforce capacity
+                                while len(self.cache_ref) > self.cache_capacity:
+                                    self.cache_ref.popitem(last=False)
+                            _next_seq_frame = ahead + 1
 
             except queue.Empty:
                 continue
@@ -584,33 +636,56 @@ class FrameLoader:
                 traceback.print_exc()
 
     def _load_image(self, path: str):
-        if not self._oiio_loaded:
-            return None
-        try:
-            inp = oiio.ImageInput.open(path)
-            if not inp:
-                return None
+        # 1. Try OpenImageIO first (native support for EXR, DPX, 16-bit TIFF, etc.)
+        if self._oiio_loaded:
             try:
-                fmt = oiio.TypeFloat
-            except AttributeError:
-                fmt = oiio.TypeDesc(oiio.FLOAT)
-            raw_data = inp.read_image(format=fmt)
-            spec = inp.spec()
-            inp.close()
-            if raw_data is None:
-                return None
-            n_ch = spec.nchannels
-            if n_ch >= 3:
-                rgb = raw_data[:, :, :3]
-            elif n_ch == 1:
-                rgb = np.repeat(raw_data[:, :, np.newaxis], 3, axis=2)
-            else:
-                rgb = np.repeat(raw_data[:, :, 0:1], 3, axis=2)
-            return np.ascontiguousarray(rgb, dtype=np.float32)
+                inp = oiio.ImageInput.open(path)
+                if inp:
+                    try:
+                        fmt = oiio.TypeFloat
+                    except AttributeError:
+                        fmt = oiio.TypeDesc(oiio.FLOAT)
+                    raw_data = inp.read_image(format=fmt)
+                    spec = inp.spec()
+                    inp.close()
+                    if raw_data is not None:
+                        n_ch = spec.nchannels
+                        if n_ch >= 3:
+                            rgb = raw_data[:, :, :3]
+                        elif n_ch == 1:
+                            rgb = np.repeat(raw_data[:, :, np.newaxis], 3, axis=2)
+                        else:
+                            rgb = np.repeat(raw_data[:, :, 0:1], 3, axis=2)
+                        return np.ascontiguousarray(rgb, dtype=np.float32)
+            except Exception:
+                pass
+
+        # 2. OpenCV fallback (TIFF, PNG, JPG, BMP, etc.)
+        try:
+            import cv2
+            img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            if img is not None:
+                if img.ndim == 2:
+                    rgb = np.repeat(img[:, :, np.newaxis], 3, axis=2)
+                elif img.shape[2] == 4:
+                    rgb = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+                elif img.shape[2] == 3:
+                    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                else:
+                    rgb = img[:, :, :3]
+
+                if rgb.dtype == np.uint8:
+                    rgb = rgb.astype(np.float32) * np.float32(1.0 / 255.0)
+                elif rgb.dtype == np.uint16:
+                    rgb = rgb.astype(np.float32) * np.float32(1.0 / 65535.0)
+                elif rgb.dtype != np.float32:
+                    rgb = rgb.astype(np.float32)
+                return np.ascontiguousarray(rgb, dtype=np.float32)
         except Exception as e:
-            print(f"Error loading {path}: {e}")
+            print(f"Error loading image {path}: {e}")
             traceback.print_exc()
-            return None
+
+        return None
 
 
 class PlaybackClock:
@@ -658,7 +733,20 @@ class PlayerCore:
 
     def load_sequence(self, folder_path):
         self._frame_metadata_cache.clear()
-        self.sequence = sorted(glob.glob(os.path.join(folder_path, '*.exr')))
+        self.sequence = []
+        try:
+            entries = sorted(os.listdir(folder_path))
+            for entry in entries:
+                ext = os.path.splitext(entry)[1].lower()
+                if ext in IMAGE_EXTENSIONS:
+                    full_p = os.path.join(folder_path, entry)
+                    seq = detect_image_sequence(full_p)
+                    if seq:
+                        self.sequence = seq
+                        break
+        except OSError:
+            pass
+
         self.current_frame = 0
         if self.sequence:
             self.media = MediaInfo(path=folder_path, type='sequence', frame_count=len(self.sequence), size=(0,0), fps=24.0)
@@ -666,38 +754,55 @@ class PlayerCore:
 
     def _extract_sequence_metadata(self):
         """Extract resolution and metadata from the first frame of a sequence."""
-        if not self.sequence or not self.loader._oiio_loaded:
+        if not self.sequence:
             return
         
+        first_frame = self.sequence[0]
+        ext = os.path.splitext(first_frame)[1].lower()
+        self.media.format = ext.lstrip('.').upper()
+
+        if self.loader._oiio_loaded:
+            try:
+                import OpenImageIO as oiio
+                inp = oiio.ImageInput.open(first_frame)
+                if inp:
+                    spec = inp.spec()
+                    self.media.size = (spec.width, spec.height)
+                    self.media.format = inp.format_name()
+                    
+                    # Pre-calculate frame memory size (RGB float32)
+                    self._frame_mem_bytes = spec.width * spec.height * 3 * 4
+                    self._recalc_capacity_from_gb()
+                    
+                    # Extract compression (codec)
+                    compression = spec.get_string_attribute("compression")
+                    if compression:
+                        self.media.codec = compression
+                    
+                    # Extract extra metadata
+                    for i in range(len(spec.extra_attribs)):
+                        attr = spec.extra_attribs[i]
+                        if attr.type.basetype == oiio.BASETYPE.STRING:
+                             self.media.metadata[attr.name] = spec.get_string_attribute(attr.name)
+                        elif attr.type.basetype in (oiio.BASETYPE.INT, oiio.BASETYPE.FLOAT):
+                             self.media.metadata[attr.name] = spec.get_float_attribute(attr.name)
+                             
+                    inp.close()
+                    return
+            except Exception:
+                pass
+
+        # Fallback to OpenCV to get resolution
         try:
-            import OpenImageIO as oiio
-            first_frame = self.sequence[0]
-            inp = oiio.ImageInput.open(first_frame)
-            if inp:
-                spec = inp.spec()
-                self.media.size = (spec.width, spec.height)
-                self.media.format = inp.format_name()
-                
-                # Pre-calculate frame memory size (RGB float32)
-                self._frame_mem_bytes = spec.width * spec.height * 3 * 4
+            import cv2
+            img = cv2.imread(first_frame, cv2.IMREAD_UNCHANGED)
+            if img is not None:
+                h, w = img.shape[:2]
+                self.media.size = (w, h)
+                self._frame_mem_bytes = w * h * 3 * 4
                 self._recalc_capacity_from_gb()
-                
-                # Extract compression (codec)
-                compression = spec.get_string_attribute("compression")
-                if compression:
-                    self.media.codec = compression
-                
-                # Extract extra metadata
-                for i in range(len(spec.extra_attribs)):
-                    attr = spec.extra_attribs[i]
-                    if attr.type.basetype == oiio.BASETYPE.STRING:
-                         self.media.metadata[attr.name] = spec.get_string_attribute(attr.name)
-                    elif attr.type.basetype in (oiio.BASETYPE.INT, oiio.BASETYPE.FLOAT):
-                         self.media.metadata[attr.name] = spec.get_float_attribute(attr.name)
-                         
-                inp.close()
         except Exception:
-            traceback.print_exc()
+            pass
 
     def load(self, path: str):
         self._frame_metadata_cache.clear()
@@ -707,8 +812,9 @@ class PlayerCore:
 
         if os.path.isfile(path):
             folder = os.path.dirname(path)
-            if path.lower().endswith('.exr'):
-                self.sequence = sorted(glob.glob(os.path.join(folder, '*.exr')))
+            ext = os.path.splitext(path)[1].lower()
+            if ext in IMAGE_EXTENSIONS:
+                self.sequence = detect_image_sequence(path)
                 if not self.sequence:
                     self.sequence = [path]
                 self.media = MediaInfo(path=folder, type='sequence', frame_count=len(self.sequence), size=(0,0), fps=24.0)
@@ -797,7 +903,7 @@ class PlayerCore:
         self._frame_metadata_cache[index] = meta
         return meta
 
-    def get_frame(self, index: int):
+    def get_frame(self, index: int, is_scrubbing: bool = False):
         if self.media is None or not (0 <= index < self.media.frame_count):
             return None
 
@@ -829,7 +935,7 @@ class PlayerCore:
                 self._frame_mem_bytes = frame.nbytes
                 self._recalc_capacity_from_gb()
             # Prefetch OUTSIDE the lock to avoid deadlock
-            if self.prefetch_enabled:
+            if self.prefetch_enabled and not is_scrubbing:
                 self.predictive_prefetch(index, self.last_direction)
             return frame
 
@@ -843,8 +949,8 @@ class PlayerCore:
         path = self._get_path(index)
         self.loader.request(path, index, priority=0)
         
-        # Adaptive prefetch based on strategy
-        if self.prefetch_enabled:
+        # Adaptive prefetch based on strategy (suppressed during fast scrubbing)
+        if self.prefetch_enabled and not is_scrubbing:
              self.predictive_prefetch(index, self.last_direction)
         
         # Immediate prune to enforce strategy-specific limits
@@ -943,12 +1049,12 @@ class PlayerCore:
                     self.cache.popitem(last=False)
                 return
 
-            # O(1) Check oldest keys first to avoid N log N sorting overhead
-            back_limit = 5
+            # Keep a healthy back_limit so micro-stutters never evict recent frames
+            back_limit = 12
             if self.strategy == PlaybackStrategy.READ_BEHIND:
-                back_limit = self.read_behind_count
+                back_limit = max(self.read_behind_count, 12)
             elif self.strategy == PlaybackStrategy.PERFORMANCE:
-                back_limit = self.cache_capacity // 3
+                back_limit = max(self.cache_capacity // 3, 12)
                 
             keys_to_remove = []
             for idx in self.cache:
@@ -976,14 +1082,13 @@ class PlayerCore:
         self.loader.strategy = strategy
         
         if strategy == PlaybackStrategy.STREAM:
-            # Stream mode uses tiny cache
-            self.set_cache_capacity(5)
+            # Stream mode: light 24-frame rolling buffer (~600MB for 4K uint8)
+            # gives a rock-solid 1-second buffer for smooth 24fps 4K playback.
+            self.set_cache_capacity(24)
         else:
-            # Restore capacity from GB
+            # Restore capacity from GB budget
             self._recalc_capacity_from_gb()
         
-        # Clear cache to ensure new logic applies
-        # (Optional, but cleaner for mode switching)
         with self.cache_lock:
             self.cache.clear()
 

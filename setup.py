@@ -3,23 +3,37 @@ cx_Freeze setup script for Knack VFX Player
 """
 import sys
 import os
+import site
 from cx_Freeze import setup, Executable
 
-# Find VisPy library path to include GLSL shaders
-import vispy
-vispy_path = os.path.dirname(vispy.__file__)
+# Find site-packages directory
+site_packages = site.getsitepackages()[-1]
+
+# Include PyAV (av) package path
+import av
+av_path = os.path.dirname(av.__file__)
+
+# Base include files
+include_files = [
+    (av_path, "lib/av"),
+    ("configs", "configs"),          # OCIO configs & LUTs (configs/ocio)
+    ("bin/ffmpeg", "bin/ffmpeg"),    # Bundled FFmpeg & ffprobe binaries
+    ("logo.ico", "logo.ico"),
+    ("LICENSE", "LICENSE"),
+]
+
+# Automatically find and include delvewheel .libs directories (e.g. av.libs, numpy.libs, scipy.libs)
+if os.path.exists(site_packages):
+    for item in os.listdir(site_packages):
+        if item.endswith(".libs"):
+            src_path = os.path.join(site_packages, item)
+            if os.path.isdir(src_path):
+                include_files.append((src_path, f"lib/{item}"))
 
 # Include binaries from OpenImageIO site-package "bin" directory
-# This ensures we match the version of the installed python bindings
 import OpenImageIO
 oiio_path = os.path.dirname(OpenImageIO.__file__)
 oiio_bin = os.path.join(oiio_path, "bin")
-
-include_files = [
-    (vispy_path, "lib/vispy"),
-    ("configs/ocio", "ocio"), # Map entire config directory to root/ocio
-    ("logo.ico", "logo.ico"),
-]
 
 # Include binaries from PyOpenColorIO site-package "bin" directory
 import PyOpenColorIO
@@ -49,7 +63,6 @@ elif os.path.exists(os.path.join(oiio_path, "lib")):
             include_files.append((source, target))
 
 # Manually include VC++ Runtime DLLs for portability
-# Check next to python executable first
 py_dir = os.path.dirname(sys.executable)
 vc_dlls = ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"]
 system32 = os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32")
@@ -62,28 +75,73 @@ for dll in vc_dlls:
     if os.path.exists(src):
         include_files.append((src, dll)) # Put in root next to exe
 
+import freetype
+freetype_path = os.path.dirname(freetype.__file__)
+include_files.append((freetype_path, "lib/freetype"))
 
-# Dependencies are automatically detected, but some modules need help
+# Build options
 build_exe_options = {
     "packages": [
         "PyQt6",
         "vispy",
+        "freetype",
         "numpy",
         "cv2",
         "scipy",
         "imageio",
         "OpenImageIO",
         "PyOpenColorIO",
+        "av",
+        "OpenGL",
+        "OpenGL.platform",
+        "OpenGL.arrays",
+        "OpenGL.GL",
     ],
-    "include_msvcr": True, # Try to include MSVC runtime (might not work on all versions)
-
+    "include_msvcr": True,
     "includes": [
         "PyQt6.QtCore",
         "PyQt6.QtGui",
         "PyQt6.QtWidgets",
-        "vispy.app.backends._pyqt6",
         "vispy.visuals",
         "vispy.scene",
+        "vispy.util.fonts",
+        "vispy.util.fonts._triage",
+        "vispy.util.fonts._vispy_fonts",
+        "vispy.util.fonts._win32",
+        "vispy.util.fonts._freetype",
+        "freetype",
+        "av",
+        "OpenGL",
+        "OpenGL.platform",
+        "OpenGL.platform.baseplatform",
+        "OpenGL.platform.ctypesloader",
+        "OpenGL.platform.win32",
+        "OpenGL.platform.glx",
+        "OpenGL.platform.darwin",
+        "OpenGL.platform.egl",
+        "OpenGL.platform.osmesa",
+        "OpenGL.platform.entrypoint31",
+        "OpenGL.arrays",
+        "OpenGL.arrays.arraydatatype",
+        "OpenGL.arrays.arrayhelpers",
+        "OpenGL.arrays.buffers",
+        "OpenGL.arrays.ctypesarrays",
+        "OpenGL.arrays.ctypesparameters",
+        "OpenGL.arrays.ctypespointers",
+        "OpenGL.arrays.formathandler",
+        "OpenGL.arrays.lists",
+        "OpenGL.arrays.nones",
+        "OpenGL.arrays.numbers",
+        "OpenGL.arrays.numpybuffers",
+        "OpenGL.arrays.numpymodule",
+        "OpenGL.arrays.strings",
+        "OpenGL.arrays.vbo",
+        "OpenGL.arrays._arrayconstants",
+        "OpenGL.arrays._buffers",
+        "OpenGL.arrays._strings",
+        "OpenGL.GL",
+        "OpenGL.GL.shaders",
+        "OpenGL.GLU",
     ],
     "excludes": [
         "tkinter",
@@ -91,18 +149,29 @@ build_exe_options = {
         "PyQt5",
         "PySide2",
         "PySide6",
+        "OpenGL_accelerate",
     ],
     "include_files": include_files,
     "zip_include_packages": ["*"],
-    "zip_exclude_packages": ["vispy"],
+    "zip_exclude_packages": [
+        "av",
+        "vispy",
+        "freetype",
+        "numpy",
+        "scipy",
+        "cv2",
+        "imageio",
+        "OpenImageIO",
+        "PyOpenColorIO",
+        "PyQt6",
+        "OpenGL",
+    ],
 }
 
-# GUI applications require a different base on Windows
 base = "Win32GUI" if sys.platform == "win32" else None
-# base = None # Enable console for debugging
 
 setup(
-    name="Knack VFX Player",
+    name="VFX Review Player",
     version="1.0",
     description="High-performance VFX sequence player with ACES color management",
     options={"build_exe": build_exe_options},
@@ -110,8 +179,10 @@ setup(
         Executable(
             "main.py",
             base=base,
-            target_name="Knack VFX Player.exe",
+            target_name="VFX Review Player.exe",
             icon="logo.ico",
         )
     ],
 )
+
+

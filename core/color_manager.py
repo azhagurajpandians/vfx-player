@@ -24,12 +24,32 @@ class ColorManager:
         self._init_ocio()
 
     def _init_ocio(self):
+        import sys
         cfg_path = self.config_path or os.environ.get('OCIO_CONFIG_PATH') or os.environ.get('OCIO')
         if not cfg_path or not os.path.isfile(cfg_path):
-            here = os.path.dirname(os.path.dirname(__file__))
-            bundled = os.path.join(here, 'configs', 'ocio', 'config.ocio')
-            if os.path.isfile(bundled):
-                cfg_path = bundled
+            here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if getattr(sys, 'frozen', False):
+                app_dir = os.path.dirname(sys.executable)
+            else:
+                app_dir = here
+
+            candidates = [
+                os.path.join(app_dir, 'configs', 'ocio', 'OpenColorIOConfigs', 'aces_1.2', 'config.ocio'),
+                os.path.join(app_dir, 'configs', 'ocio', 'config.ocio'),
+                os.path.join(app_dir, 'ocio', 'OpenColorIOConfigs', 'aces_1.2', 'config.ocio'),
+                os.path.join(app_dir, 'ocio', 'config.ocio'),
+                os.path.join(app_dir, '.knacktools', 'ocioconfig', 'OpenColorIOConfigs', 'aces_1.2', 'config.ocio'),
+                os.path.join(here, 'configs', 'ocio', 'OpenColorIOConfigs', 'aces_1.2', 'config.ocio'),
+                os.path.join(here, 'configs', 'ocio', 'config.ocio'),
+            ]
+            home = os.path.expanduser('~')
+            for root in [home, 'C:\\', 'D:\\', 'E:\\']:
+                candidates.append(os.path.join(root, '.knacktools', 'ocioconfig', 'OpenColorIOConfigs', 'aces_1.2', 'config.ocio'))
+
+            for c in candidates:
+                if os.path.isfile(c):
+                    cfg_path = c
+                    break
             else:
                 return
 
@@ -169,3 +189,77 @@ class ColorManager:
         if self.output_cs:
             return self.get_colorspace_from_label(self.output_cs)
         return self.output_cs or ""
+
+import xml.etree.ElementTree as ET
+
+def load_cdl_file(path: str) -> tuple[tuple[float,float,float], tuple[float,float,float], tuple[float,float,float], float] | None:
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+        ns = {}
+        if '}' in root.tag:
+            ns_url = root.tag.split('}')[0].strip('{')
+            ns = {'cdl': ns_url}
+            
+        def find_element(name):
+            if ns:
+                elem = root.find(f".//cdl:{name}", ns)
+                if elem is not None:
+                    return elem
+            return root.find(f".//{name}")
+            
+        slope_elem = find_element("Slope")
+        offset_elem = find_element("Offset")
+        power_elem = find_element("Power")
+        sat_elem = find_element("Saturation")
+        
+        slope = (1.0, 1.0, 1.0)
+        offset = (0.0, 0.0, 0.0)
+        power = (1.0, 1.0, 1.0)
+        sat = 1.0
+        
+        if slope_elem is not None and slope_elem.text:
+            parts = [float(x) for x in slope_elem.text.strip().split()]
+            if len(parts) == 3: slope = tuple(parts)
+        if offset_elem is not None and offset_elem.text:
+            parts = [float(x) for x in offset_elem.text.strip().split()]
+            if len(parts) == 3: offset = tuple(parts)
+        if power_elem is not None and power_elem.text:
+            parts = [float(x) for x in power_elem.text.strip().split()]
+            if len(parts) == 3: power = tuple(parts)
+        if sat_elem is not None and sat_elem.text:
+            sat = float(sat_elem.text.strip())
+            
+        return slope, offset, power, sat
+    except Exception as e:
+        print(f"Error reading CDL file {path}: {e}")
+        return None
+
+def save_cdl_file(path: str, slope: tuple, offset: tuple, power: tuple, sat: float) -> bool:
+    try:
+        root = ET.Element("ColorDecisionList", xmlns="urn:ASC:CDL:v1.01")
+        cd = ET.SubElement(root, "ColorDecision")
+        cc = ET.SubElement(cd, "ColorCorrection", id="vfx_player_grade")
+        
+        sop = ET.SubElement(cc, "SOPNode")
+        s = ET.SubElement(sop, "Slope")
+        s.text = f"{slope[0]:.6f} {slope[1]:.6f} {slope[2]:.6f}"
+        o = ET.SubElement(sop, "Offset")
+        o.text = f"{offset[0]:.6f} {offset[1]:.6f} {offset[2]:.6f}"
+        p = ET.SubElement(sop, "Power")
+        p.text = f"{power[0]:.6f} {power[1]:.6f} {power[2]:.6f}"
+        
+        sat_node = ET.SubElement(cc, "SatNode")
+        sa = ET.SubElement(sat_node, "Saturation")
+        sa.text = f"{sat:.6f}"
+        
+        tree = ET.ElementTree(root)
+        try:
+            ET.indent(tree, space="    ", level=0)
+        except Exception:
+            pass
+        tree.write(path, encoding="utf-8", xml_declaration=True)
+        return True
+    except Exception as e:
+        print(f"Error saving CDL file {path}: {e}")
+        return False

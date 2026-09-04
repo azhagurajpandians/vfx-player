@@ -48,6 +48,9 @@ A high-performance, professional media player designed for Visual Effects workfl
 - **W**: Toggle Wipe View
 - **F**: Fit to Window
 - **F11**: Fullscreen
+- **N** or **Shift+A**: Toggle Annotation Mode (works in Fullscreen)
+- **Ctrl+Z / Ctrl+Shift+Z**: Undo / Redo Annotations
+- **Ctrl+Shift+E**: Export All Annotated Frames (batch export images)
 
 ## Building from Source
 

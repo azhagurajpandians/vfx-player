@@ -123,18 +123,12 @@ class SettingsDialog(QtWidgets.QDialog):
         exr_group = QtWidgets.QGroupBox("EXR / Image Sequence Defaults")
         exr_layout = QtWidgets.QFormLayout(exr_group)
         
+        exr_defs = self.prefs.get('defaults', {}).get('exr', {})
         self.exr_in_combo = QtWidgets.QComboBox()
-        self.exr_in_combo.addItem("Use Last Used", None)
-        self.exr_in_combo.addItems(self.cm.input_choices)
+        self._setup_combo(self.exr_in_combo, self.cm.input_choices, exr_defs.get('input'))
         
         self.exr_out_combo = QtWidgets.QComboBox()
-        self.exr_out_combo.addItem("Use Last Used", None)
-        self.exr_out_combo.addItems(self.cm.output_choices)
-        
-        # Set current values
-        exr_defs = self.prefs.get('defaults', {}).get('exr', {})
-        self._set_combo(self.exr_in_combo, exr_defs.get('input'))
-        self._set_combo(self.exr_out_combo, exr_defs.get('output'))
+        self._setup_combo(self.exr_out_combo, self.cm.output_choices, exr_defs.get('output'))
         
         exr_layout.addRow("Input Transform:", self.exr_in_combo)
         exr_layout.addRow("Output Transform:", self.exr_out_combo)
@@ -144,17 +138,12 @@ class SettingsDialog(QtWidgets.QDialog):
         mov_group = QtWidgets.QGroupBox("MOV / Video Defaults")
         mov_layout = QtWidgets.QFormLayout(mov_group)
         
+        mov_defs = self.prefs.get('defaults', {}).get('mov', {})
         self.mov_in_combo = QtWidgets.QComboBox()
-        self.mov_in_combo.addItem("Use Last Used", None)
-        self.mov_in_combo.addItems(self.cm.input_choices)
+        self._setup_combo(self.mov_in_combo, self.cm.input_choices, mov_defs.get('input'))
         
         self.mov_out_combo = QtWidgets.QComboBox()
-        self.mov_out_combo.addItem("Use Last Used", None)
-        self.mov_out_combo.addItems(self.cm.output_choices)
-        
-        mov_defs = self.prefs.get('defaults', {}).get('mov', {})
-        self._set_combo(self.mov_in_combo, mov_defs.get('input'))
-        self._set_combo(self.mov_out_combo, mov_defs.get('output'))
+        self._setup_combo(self.mov_out_combo, self.cm.output_choices, mov_defs.get('output'))
         
         mov_layout.addRow("Input Transform:", self.mov_in_combo)
         mov_layout.addRow("Output Transform:", self.mov_out_combo)
@@ -176,6 +165,30 @@ class SettingsDialog(QtWidgets.QDialog):
         )
         if path:
             self.ocio_path_edit.setText(path)
+
+    def _setup_combo(self, combo: QtWidgets.QComboBox, items: list, value: str = None):
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Use Last Used", None)
+        if items:
+            combo.addItems(items)
+        
+        # Tooltips & dynamic popup width
+        fm = combo.fontMetrics()
+        max_w = 0
+        for i in range(combo.count()):
+            text = combo.itemText(i)
+            combo.setItemData(i, text, QtCore.Qt.ItemDataRole.ToolTipRole)
+            w = fm.horizontalAdvance(text) if hasattr(fm, 'horizontalAdvance') else fm.width(text)
+            if w > max_w:
+                max_w = w
+        combo.view().setMinimumWidth(max(240, max_w + 50))
+        combo.view().setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
+        
+        self._set_combo(combo, value)
+        combo.blockSignals(False)
+        combo.setToolTip(combo.currentText())
+        combo.currentTextChanged.connect(lambda txt, c=combo: c.setToolTip(txt))
 
     def _set_combo(self, combo, value):
         if value and value in self.cm.input_choices + self.cm.output_choices:

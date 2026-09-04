@@ -29,3 +29,7 @@ micromamba*
 test_*.png
 dist_installer/
 !vfx_review_player.spec
+scratch/
+*.egg-info/
+contact_sheet*
+*.err

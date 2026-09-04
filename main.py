@@ -1,6 +1,16 @@
 import os
 import sys
 
+# Disable PyOpenGL C-acceleration (OpenGL_accelerate) to prevent Cython __reduce_cython__ KeyError in frozen builds
+os.environ["PYOPENGL_PLATFORM"] = "win32"
+try:
+    import OpenGL
+    OpenGL.USE_ACCELERATE = False
+    from OpenGL import _configflags
+    _configflags.USE_ACCELERATE = False
+except Exception:
+    pass
+
 # Ensure sys.stdout and sys.stderr are valid stream objects (PyInstaller noconsole sets them to None)
 class DummyStream:
     def write(self, data): pass

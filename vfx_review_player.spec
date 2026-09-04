@@ -10,7 +10,8 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, co
 datas = [
     ('configs', 'configs'),
     ('core', 'core'),
-    ('gui', 'gui')
+    ('gui', 'gui'),
+    ('bin', 'bin'),
 ]
 binaries = []
 
@@ -71,8 +72,8 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=['hooks'],
     hooksconfig={},
-    runtime_hooks=['hooks/rthook_oiio_ocio.py'],
-    excludes=['PyQt5', 'PySide2', 'PySide6', 'PyOpenColorIO', 'OpenImageIO'],
+    runtime_hooks=['hooks/rthook_suppress_warnings.py', 'hooks/rthook_oiio_ocio.py'],
+    excludes=['PyQt5', 'PySide2', 'PySide6', 'PyOpenColorIO', 'OpenImageIO', 'tkinter', '_tkinter'],
     noarchive=False,
     optimize=0,
 )
@@ -84,11 +85,11 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='VFX Review Player',
-    debug=False,
+    debug=True,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=False,
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
