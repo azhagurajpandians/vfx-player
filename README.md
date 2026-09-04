@@ -1,4 +1,4 @@
-# Knack VFX Player
+#  VFX Review Player
 
 A high-performance, professional media player designed for Visual Effects workflows. Built with Python, PyQt6, VisPy, and OpenColorIO.
 
