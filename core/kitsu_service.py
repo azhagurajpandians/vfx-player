@@ -403,44 +403,110 @@ class KitsuService:
         self_or_cls,
         comment_id: str,
         image_path: str,
+        task_id: Optional[str] = None,
         host: Optional[str] = None,
         token: Optional[str] = None
     ) -> Dict[str, Any]:
+        """
+        Upload preview image/snapshot and attach it to the comment in Kitsu (Zou).
+        Follows the official Zou/Gazu workflow:
+          1. POST /api/actions/tasks/{task_id}/comments/{comment_id}/add-preview -> returns {id: preview_file_id}
+          2. POST /api/pictures/preview-files/{preview_file_id} (multipart 'file')
+        With multi-endpoint fallbacks for diverse Kitsu/Zou server versions.
+        """
         inst = self_or_cls if isinstance(self_or_cls, KitsuService) else kitsu_client
         host_to_use = (host or getattr(inst, "host_url", "http://localhost:8080")).rstrip("/")
         token_to_use = token or getattr(inst, "auth_token", None)
-        url = f"{host_to_use}/api/data/comments/{comment_id}/preview-file"
 
-        boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
-        filename = os.path.basename(image_path)
-        mime_type = mimetypes.guess_type(image_path)[0] or "image/png"
+        if not os.path.exists(image_path) or os.path.getsize(image_path) == 0:
+            return {}
 
         with open(image_path, "rb") as f:
             file_bytes = f.read()
 
-        body = (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
-            f"Content-Type: {mime_type}\r\n\r\n"
-        ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        filename = os.path.basename(image_path)
+        mime_type = mimetypes.guess_type(image_path)[0] or "image/png"
 
-        headers = {
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "Content-Length": str(len(body)),
-            "Authorization": f"Bearer {token_to_use}",
-            "User-Agent": "VFXPlayer-ReviewPlatform/1.0",
-        }
+        def _send_multipart(target_url: str) -> Optional[Dict[str, Any]]:
+            boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
+            body = (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+                f"Content-Type: {mime_type}\r\n\r\n"
+            ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
 
-        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=15) as response:
-                resp_text = response.read().decode("utf-8")
-                return json.loads(resp_text) if resp_text else {}
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Preview upload failed ({e.code}): {err_body}")
-        except Exception as e:
-            raise RuntimeError(f"Error uploading preview to Kitsu: {e}")
+            headers = {
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Content-Length": str(len(body)),
+                "User-Agent": "VFXPlayer-ReviewPlatform/1.0",
+            }
+            if token_to_use:
+                headers["Authorization"] = f"Bearer {token_to_use}"
+
+            req = urllib.request.Request(target_url, data=body, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=20) as response:
+                    resp_text = response.read().decode("utf-8")
+                    return json.loads(resp_text) if resp_text else {}
+            except Exception:
+                return None
+
+        # Workflow A (Official Zou/Gazu Standard):
+        # 1. Create preview model for comment
+        preview_file_id = None
+        if task_id:
+            try:
+                add_prev_res = inst._api_request(
+                    f"/actions/tasks/{task_id}/comments/{comment_id}/add-preview",
+                    host=host,
+                    token=token,
+                    data={},
+                    method="POST"
+                )
+                if isinstance(add_prev_res, dict):
+                    preview_file_id = add_prev_res.get("id") or add_prev_res.get("preview_file_id")
+            except Exception:
+                pass
+
+        if not preview_file_id:
+            try:
+                add_prev_res = inst._api_request(
+                    f"/actions/comments/{comment_id}/add-preview",
+                    host=host,
+                    token=token,
+                    data={},
+                    method="POST"
+                )
+                if isinstance(add_prev_res, dict):
+                    preview_file_id = add_prev_res.get("id") or add_prev_res.get("preview_file_id")
+            except Exception:
+                pass
+
+        # 2. Upload file bytes to the created preview entity
+        if preview_file_id:
+            up_url = f"{host_to_use}/api/pictures/preview-files/{preview_file_id}"
+            res = _send_multipart(up_url)
+            if res is not None:
+                return res
+
+        # Workflow B: Direct attachment endpoints on Zou / Kitsu
+        candidate_urls = [
+            f"{host_to_use}/api/data/comments/{comment_id}/preview-file",
+            f"{host_to_use}/api/actions/comments/{comment_id}/preview-file",
+        ]
+        if task_id:
+            candidate_urls.extend([
+                f"{host_to_use}/api/actions/tasks/{task_id}/comments/{comment_id}/add-attachment",
+                f"{host_to_use}/api/actions/tasks/{task_id}/comments/{comment_id}/preview-file",
+            ])
+
+        for curl in candidate_urls:
+            res = _send_multipart(curl)
+            if res is not None:
+                return res
+
+        print(f"[Kitsu] Warning: Could not upload preview attachment for comment {comment_id}")
+        return {}
 
     def download_preview_file(
         self_or_cls,

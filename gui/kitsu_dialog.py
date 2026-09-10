@@ -533,17 +533,35 @@ class KitsuPublishDialog(QtWidgets.QDialog):
 
         if kitsu_client.is_authenticated():
             QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+            preview_uploaded = False
+            preview_error = None
             try:
                 res = kitsu_client.post_task_comment(target_task_id, note, task_status_id=status_id)
                 comment_id = res.get("id") or res.get("comment_id")
                 if comment_id and self.annotated_image_path and os.path.exists(self.annotated_image_path):
-                    kitsu_client.upload_comment_preview(comment_id, self.annotated_image_path)
+                    try:
+                        prev_res = kitsu_client.upload_comment_preview(
+                            comment_id,
+                            self.annotated_image_path,
+                            task_id=target_task_id
+                        )
+                        if prev_res:
+                            preview_uploaded = True
+                    except Exception as pe:
+                        preview_error = str(pe)
             except Exception as e:
                 QtWidgets.QApplication.restoreOverrideCursor()
-                QtWidgets.QMessageBox.critical(self, "Publish Error", f"Failed to publish to Kitsu:\n{e}")
+                QtWidgets.QMessageBox.critical(self, "Publish Error", f"Failed to post comment to Kitsu:\n{e}")
                 return
             finally:
                 QtWidgets.QApplication.restoreOverrideCursor()
+
+            if self.annotated_image_path and not preview_uploaded and preview_error:
+                QtWidgets.QMessageBox.warning(
+                    self, "Preview Notice",
+                    f"Review note and status were successfully published to Kitsu!\n\n"
+                    f"Note: Annotated snapshot preview attachment could not be uploaded:\n{preview_error}"
+                )
 
         self.accept()
 
