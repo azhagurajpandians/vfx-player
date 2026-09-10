@@ -37,8 +37,12 @@ Name: "contextmenu"; Description: "Add 'Open with VFX Review Player' to right-cl
 Name: "assoc_vfx"; Description: "Associate EXR, DPX, CIN files with VFX Review Player"; GroupDescription: "File Associations:"
 Name: "assoc_media"; Description: "Associate MOV, MP4, PNG, JPG, TIFF files with VFX Review Player"; GroupDescription: "File Associations:"
 
+#ifndef AppSourceDir
+#define AppSourceDir "build\exe.win-amd64-3.11"
+#endif
+
 [Files]
-Source: "build\exe.win-amd64-3.11\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#AppSourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{userprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"

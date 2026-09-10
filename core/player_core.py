@@ -23,8 +23,11 @@ import numpy as np
 import traceback
 import enum
 import av
+from fractions import Fraction
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Any
+from core.timeline_service import TimelineService, to_rational_fps, frame_to_timecode, timecode_to_frame
+from core.color_pipeline import ColorPipeline, ColorState
 
 IMAGE_EXTENSIONS = {'.exr', '.sxr', '.tif', '.tiff', '.dpx', '.cin', '.png', '.jpg', '.jpeg', '.tga', '.bmp', '.webp'}
 VIDEO_EXTENSIONS = {'.mov', '.mp4', '.avi', '.mkv', '.mxf', '.webm', '.m4v', '.flv', '.ts'}
@@ -73,6 +76,33 @@ def detect_image_sequence(file_path: str) -> List[str]:
     return [file_path]
 
 
+def scan_missing_frames(paths: List[str]) -> Tuple[List[int], int, int]:
+    """
+    Extract frame numbers from sequence filenames and identify missing frame gaps.
+    Returns (missing_frame_numbers, start_frame, end_frame).
+    """
+    if not paths or len(paths) <= 1:
+        return [], 0, 0
+
+    frame_nums = []
+    for p in paths:
+        base = os.path.splitext(os.path.basename(p))[0]
+        m = re.findall(r'\d+', base)
+        if m:
+            frame_nums.append(int(m[-1]))
+
+    if len(frame_nums) < 2:
+        return [], 0, 0
+
+    start_frame = frame_nums[0]
+    end_frame = frame_nums[-1]
+
+    num_set = set(frame_nums)
+    expected_range = range(start_frame, end_frame + 1)
+    missing = [fn for fn in expected_range if fn not in num_set]
+    return missing, start_frame, end_frame
+
+
 class PlaybackStrategy(enum.Enum):
     PERFORMANCE = "performance"  # Full aggressive caching
     PROGRESSIVE = "progressive"  # Sequential foreground lead
@@ -89,10 +119,16 @@ class MediaInfo:
     format: str = ""
     codec: str = ""
     metadata: Dict[str, Any] = None
+    missing_frames: List[int] = None
+    start_frame: int = 0
+    end_frame: int = 0
+    timeline: Optional[Any] = None
 
     def __post_init__(self):
         if self.metadata is None:
             self.metadata = {}
+        if self.missing_frames is None:
+            self.missing_frames = []
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +214,7 @@ def _find_ffprobe():
 
 
 def probe_video(path: str) -> dict:
-    """Use ffprobe to get video metadata. Returns dict with fps, width, height, frame_count."""
+    """Use ffprobe to get video metadata. Returns dict with fps, width, height, frame_count, time_base."""
     ffprobe = _find_ffprobe()
     if not ffprobe:
         return {}
@@ -186,7 +222,7 @@ def probe_video(path: str) -> dict:
         cmd = [
             ffprobe, '-v', 'quiet',
             '-select_streams', 'v:0',
-            '-show_entries', 'stream=width,height,r_frame_rate,nb_frames,duration,codec_name,codec_long_name',
+            '-show_entries', 'stream=width,height,r_frame_rate,time_base,nb_frames,duration,codec_name,codec_long_name',
             '-show_entries', 'format=duration,format_name,format_long_name',
             '-of', 'csv=p=0',
             path
@@ -199,7 +235,7 @@ def probe_video(path: str) -> dict:
         lines = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
         info = {}
         if lines:
-            # First line: stream info: width,height,r_frame_rate,nb_frames,duration,codec_name,codec_long_name
+            # First line: stream info: width,height,r_frame_rate,time_base,nb_frames,duration,codec_name,codec_long_name
             parts = lines[0].split(',')
             if len(parts) >= 3:
                 info['width'] = int(parts[0]) if parts[0] else 1920
@@ -212,18 +248,22 @@ def probe_video(path: str) -> dict:
                 else:
                     info['fps'] = float(fps_str) if fps_str else 24.0
 
-                # nb_frames
+                # time_base
                 if len(parts) >= 4 and parts[3] and parts[3] != 'N/A':
-                    info['frame_count'] = int(parts[3])
-                # stream duration
+                    info['time_base'] = parts[3]
+
+                # nb_frames
                 if len(parts) >= 5 and parts[4] and parts[4] != 'N/A':
-                    info['duration'] = float(parts[4])
+                    info['frame_count'] = int(parts[4])
+                # stream duration
+                if len(parts) >= 6 and parts[5] and parts[5] != 'N/A':
+                    info['duration'] = float(parts[5])
                 
                 # codec
-                if len(parts) >= 6 and parts[5]:
-                    info['codec'] = parts[5]
                 if len(parts) >= 7 and parts[6]:
-                    info['codec_long'] = parts[6]
+                    info['codec'] = parts[6]
+                if len(parts) >= 8 and parts[7]:
+                    info['codec_long'] = parts[7]
 
             # Second line might be format info: duration,format_name,format_long_name
             if len(lines) > 1:
@@ -284,9 +324,9 @@ class FFmpegReader:
 
         if need_seek:
             try:
-                time_base = float(self._stream.time_base)
-                sec = target_index / fps
-                pts = int(sec / time_base)
+                stream_tb = Fraction(self._stream.time_base.numerator, self._stream.time_base.denominator)
+                rat_fps = to_rational_fps(fps)
+                pts = int(round(float(Fraction(target_index, 1) / (rat_fps * stream_tb))))
                 
                 self._container.seek(pts, stream=self._stream)
                 self._frames_generator = self._container.decode(self._stream)
@@ -295,9 +335,9 @@ class FFmpegReader:
                 traceback.print_exc()
                 self._open()
                 try:
-                    time_base = float(self._stream.time_base)
-                    sec = target_index / fps
-                    pts = int(sec / time_base)
+                    stream_tb = Fraction(self._stream.time_base.numerator, self._stream.time_base.denominator)
+                    rat_fps = to_rational_fps(fps)
+                    pts = int(round(float(Fraction(target_index, 1) / (rat_fps * stream_tb))))
                     self._container.seek(pts, stream=self._stream)
                     self._frames_generator = self._container.decode(self._stream)
                     self._current_frame = -1
@@ -309,9 +349,9 @@ class FFmpegReader:
             try:
                 av_frame = next(self._frames_generator)
                 if av_frame.pts is not None:
-                    time_base = float(self._stream.time_base)
-                    pts_sec = av_frame.pts * time_base
-                    curr_idx = int(round(pts_sec * fps))
+                    stream_tb = Fraction(self._stream.time_base.numerator, self._stream.time_base.denominator)
+                    rat_fps = to_rational_fps(fps)
+                    curr_idx = int(round(float(Fraction(av_frame.pts, 1) * stream_tb * rat_fps)))
                 else:
                     curr_idx = self._current_frame + 1
 
@@ -719,6 +759,7 @@ class PlayerCore:
         self._frame_mem_bytes = 0  # Auto-set when first frame is cached
         self.media: Optional[MediaInfo] = None
         self._frame_metadata_cache = {}
+        self.color_pipeline = ColorPipeline()
 
         self.cache_lock = threading.Lock()
         self.cache = collections.OrderedDict()
@@ -810,14 +851,26 @@ class PlayerCore:
             self.cache.clear()
             self.loader.clear_pending()
 
-        if os.path.isfile(path):
-            folder = os.path.dirname(path)
-            ext = os.path.splitext(path)[1].lower()
-            if ext in IMAGE_EXTENSIONS:
+        is_url = path.startswith("http://") or path.startswith("https://")
+        if os.path.isfile(path) or is_url:
+            folder = os.path.dirname(path) if not is_url else ""
+            ext = os.path.splitext(path)[1].lower() if not is_url else ".mp4"
+            if not is_url and ext in IMAGE_EXTENSIONS:
                 self.sequence = detect_image_sequence(path)
                 if not self.sequence:
                     self.sequence = [path]
-                self.media = MediaInfo(path=folder, type='sequence', frame_count=len(self.sequence), size=(0,0), fps=24.0)
+                missing_frames, start_fr, end_fr = scan_missing_frames(self.sequence)
+                self.media = MediaInfo(
+                    path=folder,
+                    type='sequence',
+                    frame_count=len(self.sequence),
+                    size=(0, 0),
+                    fps=24.0,
+                    missing_frames=missing_frames,
+                    start_frame=start_fr,
+                    end_frame=end_fr
+                )
+                self.media.timeline = TimelineService(fps=24.0, frame_count=len(self.sequence))
                 self._extract_sequence_metadata()
             else:
                 import cv2
@@ -852,7 +905,18 @@ class PlayerCore:
                         fps = info.get('fps', 24.0)
                         fc = info.get('frame_count', 100)
 
-                self.media = MediaInfo(path=path, type='video', frame_count=fc, size=(w,h), fps=fps)
+                tb_val = info.get('time_base') if info else None
+                self.media = MediaInfo(
+                    path=path,
+                    type='video',
+                    frame_count=fc,
+                    size=(w, h),
+                    fps=fps,
+                    missing_frames=[],
+                    start_frame=0,
+                    end_frame=max(0, fc - 1)
+                )
+                self.media.timeline = TimelineService(fps=fps, time_base=tb_val, frame_count=fc)
                 if info:
                     self.media.format = info.get('format', '')
                     self.media.codec = info.get('codec', '')

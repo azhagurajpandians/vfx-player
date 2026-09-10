@@ -2,7 +2,7 @@
 
 import sys, os, json, ctypes
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict, Any
 from PyQt6 import QtWidgets, QtGui, QtCore
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtCore import QUrl
@@ -13,6 +13,16 @@ from core.player_core import PlaybackStrategy
 from gui.metadata_dialog import MetadataDialog
 from gui.export_dialog import ExportDialog
 from gui.annotation_toolbar import AnnotationToolbar
+from core.annotation_service import AnnotationService
+from core.version_detector import VersionDetector, VersionGroup
+from gui.scopes_dialog import ScopesDialog
+import tempfile, webbrowser
+from core.playlist_service import PlaylistService, PlaylistItem
+from core.kitsu_service import kitsu_client, KitsuService
+from gui.playlist_widget import PlaylistWidget
+from gui.kitsu_dialog import KitsuConnectDialog, KitsuPublishDialog
+from gui.color_wheels_widget import ColorWheelWidget, ColorGradingPanel
+from gui.version_dialog import VersionCompareDialog
 
 def set_dark_title_bar(hwnd):
     if sys.platform == 'win32':
@@ -34,7 +44,7 @@ def set_dark_title_bar(hwnd):
 
 
 class PlayheadSlider(QtWidgets.QSlider):
-    """Horizontal slider with playhead line and cached-frame indicators."""
+    """Horizontal slider with playhead line, cached-frame, bookmark, missing, and In/Out indicators."""
     def __init__(self, *args, **kwargs):
         super().__init__(QtCore.Qt.Orientation.Horizontal, *args, **kwargs)
         self.setTickPosition(QtWidgets.QSlider.TickPosition.NoTicks)
@@ -42,6 +52,10 @@ class PlayheadSlider(QtWidgets.QSlider):
         self.setSingleStep(1)
         self._cached_indices = set()  # Set of cached frame indices
         self._annotated_indices = set()  # Set of annotated frame indices
+        self._bookmarks = set()  # Set of bookmarked frame indices
+        self._missing_indices = set()  # Set of missing frame indices
+        self._in_point = None
+        self._out_point = None
         self._show_cached = True  # Whether to show cached frame indicators
         self.setStyleSheet("""
             QSlider::groove:horizontal {
@@ -116,6 +130,25 @@ class PlayheadSlider(QtWidgets.QSlider):
             self._annotated_indices = indices
             self.update()
 
+    def set_bookmarks(self, bookmarks: set):
+        """Update the set of bookmarked frame indices and repaint."""
+        if self._bookmarks != bookmarks:
+            self._bookmarks = set(bookmarks)
+            self.update()
+
+    def set_missing_indices(self, missing: set):
+        """Update the set of missing frame indices and repaint."""
+        if self._missing_indices != missing:
+            self._missing_indices = set(missing)
+            self.update()
+
+    def set_in_out(self, in_point: Optional[int], out_point: Optional[int]):
+        """Update In and Out loop range and repaint."""
+        if self._in_point != in_point or self._out_point != out_point:
+            self._in_point = in_point
+            self._out_point = out_point
+            self.update()
+
     def set_show_cached(self, show: bool):
         self._show_cached = show
         self.update()
@@ -132,30 +165,79 @@ class PlayheadSlider(QtWidgets.QSlider):
         margin = 5
         track_w = self.width() - (margin * 2)
         rng = self.maximum() - self.minimum()
-        
+        if rng <= 0 or track_w <= 0:
+            p.end()
+            return
+
+        groove_mid_y = self.height() // 2
+
+        # --- Draw In / Out range shaded loop region & brackets ---
+        if self._in_point is not None and self._out_point is not None and self._in_point < self._out_point:
+            r_in = max(self.minimum(), min(self.maximum(), self._in_point))
+            r_out = max(self.minimum(), min(self.maximum(), self._out_point))
+            x_in = margin + int(((r_in - self.minimum()) / rng) * track_w)
+            x_out = margin + int(((r_out - self.minimum()) / rng) * track_w)
+            
+            # Subtle highlight bar between In and Out
+            p.fillRect(x_in, groove_mid_y - 6, max(2, x_out - x_in), 12, QtGui.QColor(255, 214, 10, 35))
+            
+            # In bracket marker: [
+            bracket_pen = QtGui.QPen(QtGui.QColor("#ffd60a"), 2)
+            p.setPen(bracket_pen)
+            p.drawLine(x_in, groove_mid_y - 6, x_in, groove_mid_y + 6)
+            p.drawLine(x_in, groove_mid_y - 6, x_in + 3, groove_mid_y - 6)
+            p.drawLine(x_in, groove_mid_y + 6, x_in + 3, groove_mid_y + 6)
+
+            # Out bracket marker: ]
+            p.drawLine(x_out, groove_mid_y - 6, x_out, groove_mid_y + 6)
+            p.drawLine(x_out, groove_mid_y - 6, x_out - 3, groove_mid_y - 6)
+            p.drawLine(x_out, groove_mid_y + 6, x_out - 3, groove_mid_y + 6)
+
         # --- Draw cached frame indicators (green bar at bottom of groove) ---
-        if self._show_cached and self._cached_indices and rng > 0:
+        if self._show_cached and self._cached_indices:
             cache_pen = QtGui.QPen(QtGui.QColor("#2ecc71"))  # Green
             cache_pen.setWidth(2)
             p.setPen(cache_pen)
-            groove_y = self.height() // 2 + 3  # Just below groove center
+            groove_y = groove_mid_y + 3  # Just below groove center
             for idx in self._cached_indices:
                 if self.minimum() <= idx <= self.maximum():
                     ratio = (idx - self.minimum()) / rng
                     cx = margin + int(ratio * track_w)
                     p.drawLine(cx, groove_y, cx, groove_y + 3)
+
+        # --- Draw missing frame indicators (red tick marks) ---
+        if self._missing_indices:
+            miss_pen = QtGui.QPen(QtGui.QColor("#ff453a"))  # Red
+            miss_pen.setWidth(2)
+            p.setPen(miss_pen)
+            for idx in self._missing_indices:
+                if self.minimum() <= idx <= self.maximum():
+                    ratio = (idx - self.minimum()) / rng
+                    cx = margin + int(ratio * track_w)
+                    p.drawLine(cx, groove_mid_y - 4, cx, groove_mid_y + 4)
+
+        # --- Draw bookmark indicators (cyan tick marks) ---
+        if self._bookmarks:
+            bm_pen = QtGui.QPen(QtGui.QColor("#00d2ff"))  # Cyan
+            bm_pen.setWidth(2)
+            p.setPen(bm_pen)
+            for idx in self._bookmarks:
+                if self.minimum() <= idx <= self.maximum():
+                    ratio = (idx - self.minimum()) / rng
+                    cx = margin + int(ratio * track_w)
+                    p.drawLine(cx, groove_mid_y + 4, cx, groove_mid_y + 9)
                     
         # --- Draw annotated frame indicators (orange tick marks above groove) ---
-        if self._annotated_indices and rng > 0:
+        if self._annotated_indices:
             annot_pen = QtGui.QPen(QtGui.QColor("#ff9f0a"))  # Orange
             annot_pen.setWidth(2)
             p.setPen(annot_pen)
-            groove_y = self.height() // 2 - 3  # Just above groove center
+            groove_y = groove_mid_y - 3  # Just above groove center
             for idx in self._annotated_indices:
                 if self.minimum() <= idx <= self.maximum():
                     ratio = (idx - self.minimum()) / rng
                     cx = margin + int(ratio * track_w)
-                    p.drawLine(cx, groove_y - 4, cx, groove_y)
+                    p.drawLine(cx, groove_y - 5, cx, groove_y)
         
         # Draw custom blue tick marks
         interval = self.tickInterval()
@@ -336,6 +418,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.exposure = 0.0
         self.gamma = 1.0
         self.channel_mode = 'RGB'
+        self.alpha_mode = 'RGB'
         self.compare_loaded = False
         self.compare_offset = 0
         self.side_by_side = False
@@ -532,12 +615,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Viewports
         try:
-            self.viewport = VispyViewport(main_window=self, role='primary')
-            self.viewport_b = VispyViewport(main_window=self, role='secondary')
-            self.viewport_c = VispyViewport(main_window=self, role='viewport_c')
-            self.viewport_d = VispyViewport(main_window=self, role='viewport_d')
-            self.viewport_e = VispyViewport(main_window=self, role='viewport_e')
-            self.viewport_f = VispyViewport(main_window=self, role='viewport_f')
+            self.viewport = VispyViewport(main_window=self, role='primary', slot_index=0)
+            self.viewport_b = VispyViewport(main_window=self, role='secondary', slot_index=1)
+            self.viewport_c = VispyViewport(main_window=self, role='viewport_c', slot_index=2)
+            self.viewport_d = VispyViewport(main_window=self, role='viewport_d', slot_index=3)
+            self.viewport_e = VispyViewport(main_window=self, role='viewport_e', slot_index=4)
+            self.viewport_f = VispyViewport(main_window=self, role='viewport_f', slot_index=5)
             
             self.viewports = [self.viewport, self.viewport_b, self.viewport_c, self.viewport_d, self.viewport_e, self.viewport_f]
             
@@ -568,6 +651,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # {'tool': str, 'points': [(x,y)...], 'points2': [(x,y)...]|None,
         #  'color': (r,g,b,a), 'width': int, 'text': str|None}
         self.annotations = {}
+        self.bookmarks: set[int] = set()
+        self.version_group: Optional[VersionGroup] = None
+        self.scopes_dialog: Optional[ScopesDialog] = None
         self._annotation_undo_stack: dict[int, list] = {}  # per-frame undo snapshots
         self._annotation_redo_stack: dict[int, list] = {}  # per-frame redo snapshots
         self.central_widget = QtWidgets.QWidget()
@@ -583,11 +669,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self.viewport_layout = QtWidgets.QVBoxLayout(self.viewport_container)
         self.viewport_layout.setContentsMargins(0, 0, 0, 0)
 
+        self.playlist_service = PlaylistService()
+        self._current_kitsu_shot: Optional[PlaylistItem] = None
+
         # Main Split / Side layout container
         self.main_split_container = QtWidgets.QWidget()
         self.main_split_layout = QtWidgets.QHBoxLayout(self.main_split_container)
         self.main_split_layout.setContentsMargins(0, 0, 0, 0)
         self.main_split_layout.setSpacing(0)
+
+        # Playlist / Shot Browser Drawer (Left dock)
+        self.playlist_widget = PlaylistWidget(self.playlist_service, parent=self)
+        self.playlist_widget.hide()
+        self.playlist_widget.shot_selected.connect(self._on_playlist_shot_selected)
+        self.playlist_widget.load_kitsu_requested.connect(self._on_load_kitsu_playlist)
+        self.playlist_widget.publish_kitsu_requested.connect(self._on_publish_kitsu_review)
+        self.playlist_widget.version_compare_requested.connect(self._show_version_compare_dialog)
+        self.playlist_widget.compare_prev_version_requested.connect(self._version_compare_prev)
+        self.playlist_widget.open_kitsu_requested.connect(self._on_kitsu_shot_opened)
+        self.playlist_widget.add_media_requested.connect(self._on_playlist_add_files)
+        self.playlist_widget.add_folder_requested.connect(self._on_playlist_add_folder)
+        self.playlist_widget.files_dropped.connect(self.add_media_paths_to_playlist)
+        self.main_split_layout.addWidget(self.playlist_widget)
+
+        # Global Window Shortcuts for PageUp / PageDown playlist navigation
+        self._shortcut_page_up = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_PageUp), self)
+        self._shortcut_page_up.setContext(QtCore.Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_page_up.activated.connect(self.playlist_prev_shot)
+
+        self._shortcut_page_down = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_PageDown), self)
+        self._shortcut_page_down.setContext(QtCore.Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_page_down.activated.connect(self.playlist_next_shot)
 
         self.main_split_layout.addWidget(self.grid_container, 1)
         
@@ -647,6 +759,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.exposure = 0.0
         self.gamma = 1.0
         self.channel_mode = 'RGB'
+        self.alpha_mode = 'RGB'
         self.prefs = {}
         self._load_prefs()
         # Apply prefs to manager
@@ -779,11 +892,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 border-radius: 5px;
                 color: #d1d1d6;
                 padding: 2px 8px;
-                font-size: 11px;
-                font-weight: 500;
                 font-family: "SF Mono", Consolas, "Cascadia Code", monospace;
             }
         """
+        self._badge_style = badge_style
+        self._mono_badge_style = mono_badge_style
 
         # --- Left Section: Media Specs & Status ---
         self.status_left_widget = QtWidgets.QWidget()
@@ -1068,7 +1181,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QPushButton {
                 background-color: #1e1e22;
                 color: #d1d1d6;
-                font-size: 12px;
+                font-size: 11px;
                 border: 1px solid #2c2c30;
                 border-radius: 6px;
                 font-weight: 600;
@@ -1086,6 +1199,62 @@ class MainWindow(QtWidgets.QMainWindow):
         """)
         self.btn_annotate.clicked.connect(self._toggle_annotate_mode)
         controls_layout.addWidget(self.btn_annotate)
+
+        # Grade Button (Near Annotate)
+        self.btn_grade = QtWidgets.QPushButton("🎨 Grade")
+        self.btn_grade.setCheckable(True)
+        self.btn_grade.setFixedSize(82, 28)
+        self.btn_grade.setToolTip("Toggle ASC CDL Color Grading Panel [Ctrl+G]")
+        self.btn_grade.setStyleSheet("""
+            QPushButton {
+                background-color: #1e1e22;
+                color: #d1d1d6;
+                font-size: 11px;
+                border: 1px solid #2c2c30;
+                border-radius: 6px;
+                font-weight: 600;
+                padding: 0 8px;
+            }
+            QPushButton:checked {
+                color: #ffffff;
+                background-color: #0a84ff;
+                border-color: #0a84ff;
+            }
+            QPushButton:hover {
+                background-color: #2c2c30;
+                color: #ffffff;
+            }
+        """)
+        self.btn_grade.clicked.connect(lambda: self._toggle_grade_panel())
+        controls_layout.addWidget(self.btn_grade)
+
+        # False Color Button (Near Annotate)
+        self.btn_false_color = QtWidgets.QPushButton("🌈 False Color")
+        self.btn_false_color.setCheckable(True)
+        self.btn_false_color.setFixedSize(104, 28)
+        self.btn_false_color.setToolTip("Toggle 10-Zone False Color Exposure Heatmap [Ctrl+Alt+F]")
+        self.btn_false_color.setStyleSheet("""
+            QPushButton {
+                background-color: #1e1e22;
+                color: #d1d1d6;
+                font-size: 11px;
+                border: 1px solid #2c2c30;
+                border-radius: 6px;
+                font-weight: 600;
+                padding: 0 8px;
+            }
+            QPushButton:checked {
+                color: #ffffff;
+                background-color: #ff9500;
+                border-color: #ff9500;
+            }
+            QPushButton:hover {
+                background-color: #2c2c30;
+                color: #ffffff;
+            }
+        """)
+        self.btn_false_color.clicked.connect(lambda: self._toggle_false_color(self.btn_false_color.isChecked()))
+        controls_layout.addWidget(self.btn_false_color)
 
         controls_layout.addStretch(1) # Right spacer
 
@@ -1636,6 +1805,17 @@ class MainWindow(QtWidgets.QMainWindow):
         load_annot_action.triggered.connect(self._load_annotations_from_file)
         file_menu.addAction(load_annot_action)
 
+        save_sidecar_action = QtGui.QAction("Save Review Sidecar (.review.json)", self)
+        save_sidecar_action.setToolTip("Save annotations, bookmarks, and In/Out points to .review.json sidecar")
+        save_sidecar_action.setShortcut("Ctrl+S")
+        save_sidecar_action.triggered.connect(self._save_review_sidecar)
+        file_menu.addAction(save_sidecar_action)
+
+        load_sidecar_action = QtGui.QAction("Load Review Sidecar...", self)
+        load_sidecar_action.setToolTip("Load review sidecar containing annotations and bookmarks")
+        load_sidecar_action.triggered.connect(self._load_review_sidecar)
+        file_menu.addAction(load_sidecar_action)
+
         file_menu.addSeparator()
 
         load_ocio_action = QtGui.QAction("Load OCIO Config...", self)
@@ -1680,6 +1860,12 @@ class MainWindow(QtWidgets.QMainWindow):
         metadata_action.triggered.connect(self._open_metadata_dialog)
         view_menu.addAction(metadata_action)
 
+        scopes_action = QtGui.QAction("Scopes (Histogram / Waveform)...", self)
+        scopes_action.setShortcut("Ctrl+H")
+        scopes_action.setToolTip("Open real-time image histogram and RGB waveform analysis window")
+        scopes_action.triggered.connect(self._toggle_scopes)
+        view_menu.addAction(scopes_action)
+
         view_menu.addSeparator()
 
         self.minimal_action = QtGui.QAction("Minimal View (Borderless)", self)
@@ -1699,7 +1885,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.annot_view_action = QtGui.QAction("Annotation Mode", self)
         self.annot_view_action.setCheckable(True)
         self.annot_view_action.setShortcut("N")
-        self.annot_view_action.setToolTip("Toggle Annotation toolbar and drawing mode (N or Shift+A)")
+        self.annot_view_action.setToolTip("Toggle Annotation toolbar and drawing mode (N or Alt+A)")
         self.annot_view_action.triggered.connect(self._toggle_annotate_mode)
         view_menu.addAction(self.annot_view_action)
 
@@ -1742,6 +1928,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.guide_title_action.setChecked(True)
         self.guide_title_action.triggered.connect(self._update_guides_config)
         guides_menu.addAction(self.guide_title_action)
+
+        alpha_menu = view_menu.addMenu("Alpha Presentation")
+        self._alpha_actions = {}
+        alpha_group = QtGui.QActionGroup(self)
+        for mode_name, label in [
+            ('RGB', 'RGB (Ignore Alpha)'),
+            ('Checkerboard', 'Checkerboard Background (VFX)'),
+            ('Alpha', 'Alpha Grayscale (Matte)'),
+            ('Black', 'Black Background'),
+            ('White', 'White Background'),
+        ]:
+            act = QtGui.QAction(label, self)
+            act.setCheckable(True)
+            if mode_name == getattr(self, 'alpha_mode', 'RGB'):
+                act.setChecked(True)
+            act.triggered.connect(lambda checked, m=mode_name: self._set_alpha_mode(m))
+            alpha_group.addAction(act)
+            alpha_menu.addAction(act)
+            self._alpha_actions[mode_name] = act
+
+        view_menu.addSeparator()
+
+        self.false_color_action = QtGui.QAction("False Color Exposure Scale", self)
+        self.false_color_action.setCheckable(True)
+        self.false_color_action.setShortcut("Ctrl+Alt+F")
+        self.false_color_action.setStatusTip("Toggle 10-zone false color exposure & clipping heatmap")
+        self.false_color_action.triggered.connect(self._toggle_false_color)
+        view_menu.addAction(self.false_color_action)
 
         view_menu.addSeparator()
 
@@ -1847,6 +2061,16 @@ class MainWindow(QtWidgets.QMainWindow):
         load_annot_act.triggered.connect(self._load_annotations_from_file)
         annotate_menu.addAction(load_annot_act)
 
+        save_sidecar_act = QtGui.QAction("Save Review Sidecar (.review.json)", self)
+        save_sidecar_act.setToolTip("Save annotations, bookmarks, and In/Out points to .review.json sidecar")
+        save_sidecar_act.triggered.connect(self._save_review_sidecar)
+        annotate_menu.addAction(save_sidecar_act)
+
+        load_sidecar_act = QtGui.QAction("Load Review Sidecar...", self)
+        load_sidecar_act.setToolTip("Load annotations and bookmarks from .review.json sidecar")
+        load_sidecar_act.triggered.connect(self._load_review_sidecar)
+        annotate_menu.addAction(load_sidecar_act)
+
         annotate_menu.addSeparator()
 
         export_annot_all_act = QtGui.QAction("Export All Annotated Frames...", self)
@@ -1889,6 +2113,130 @@ class MainWindow(QtWidgets.QMainWindow):
         stop_action = QtGui.QAction("Stop", self)
         stop_action.triggered.connect(self.stop)
         play_menu.addAction(stop_action)
+
+        play_menu.addSeparator()
+
+        in_action = QtGui.QAction("Set In Point", self)
+        in_action.setShortcut("I")
+        in_action.setToolTip("Set playback In point at current frame (I)")
+        in_action.triggered.connect(self._set_in_point)
+        play_menu.addAction(in_action)
+
+        out_action = QtGui.QAction("Set Out Point", self)
+        out_action.setShortcut("O")
+        out_action.setToolTip("Set playback Out point at current frame (O)")
+        out_action.triggered.connect(self._set_out_point)
+        play_menu.addAction(out_action)
+
+        clear_in_out_action = QtGui.QAction("Clear In/Out Points", self)
+        clear_in_out_action.setShortcut("X")
+        clear_in_out_action.setToolTip("Reset In/Out range to full clip (X)")
+        clear_in_out_action.triggered.connect(self._clear_in_out_range)
+        play_menu.addAction(clear_in_out_action)
+
+        play_menu.addSeparator()
+
+        bookmark_action = QtGui.QAction("Toggle Bookmark", self)
+        bookmark_action.setShortcut("B")
+        bookmark_action.setToolTip("Toggle bookmark marker at current frame (B)")
+        bookmark_action.triggered.connect(self._toggle_bookmark)
+        play_menu.addAction(bookmark_action)
+
+        next_bm_action = QtGui.QAction("Next Bookmark / Annotation", self)
+        next_bm_action.setShortcut("Shift+Right")
+        next_bm_action.triggered.connect(self._jump_to_next_annotated_frame)
+        play_menu.addAction(next_bm_action)
+
+        prev_bm_action = QtGui.QAction("Previous Bookmark / Annotation", self)
+        prev_bm_action.setShortcut("Shift+Left")
+        prev_bm_action.triggered.connect(self._jump_to_prev_annotated_frame)
+        play_menu.addAction(prev_bm_action)
+
+        clear_bms_action = QtGui.QAction("Clear All Bookmarks", self)
+        clear_bms_action.triggered.connect(self._clear_all_bookmarks)
+        play_menu.addAction(clear_bms_action)
+
+        # Versions Menu
+        versions_menu = self.menuBar().addMenu("Versions")
+
+        next_ver_act = QtGui.QAction("Next Version", self)
+        next_ver_act.setShortcut("Ctrl+Up")
+        next_ver_act.setToolTip("Switch to next detected shot version (Ctrl+Up)")
+        next_ver_act.triggered.connect(self._version_up)
+        versions_menu.addAction(next_ver_act)
+
+        prev_ver_act = QtGui.QAction("Previous Version", self)
+        prev_ver_act.setShortcut("Ctrl+Down")
+        prev_ver_act.setToolTip("Switch to previous detected shot version (Ctrl+Down)")
+        prev_ver_act.triggered.connect(self._version_down)
+        versions_menu.addAction(prev_ver_act)
+
+        latest_ver_act = QtGui.QAction("Latest Version", self)
+        latest_ver_act.setShortcut("Ctrl+Shift+Up")
+        latest_ver_act.setToolTip("Switch directly to latest shot version (Ctrl+Shift+Up)")
+        latest_ver_act.triggered.connect(self._version_latest)
+        versions_menu.addAction(latest_ver_act)
+
+        versions_menu.addSeparator()
+
+        compare_ver_act = QtGui.QAction("Compare with Previous Version (Wipe)", self)
+        compare_ver_act.setShortcut("Ctrl+Alt+C")
+        compare_ver_act.setToolTip("Load previous version into B track and enable Wipe (Ctrl+Alt+C)")
+        compare_ver_act.triggered.connect(self._version_compare_prev)
+        versions_menu.addAction(compare_ver_act)
+
+        versions_tasks_act = QtGui.QAction("Versions & Tasks for this Shot...", self)
+        versions_tasks_act.setShortcut("Ctrl+Alt+V")
+        versions_tasks_act.setToolTip("Inspect and compare all task versions (Edit, Comp, Lighting, Anim) in Wipe or Side-by-Side (Ctrl+Alt+V)")
+        versions_tasks_act.triggered.connect(lambda: self._show_version_compare_dialog())
+        versions_menu.addAction(versions_tasks_act)
+
+        # Studio Menu (Kitsu & Multi-Shot Review)
+        studio_menu = self.menuBar().addMenu("Studio")
+
+        toggle_playlist_act = QtGui.QAction("Toggle Playlist Panel", self)
+        toggle_playlist_act.setShortcut("Ctrl+L")
+        toggle_playlist_act.setToolTip("Show / Hide Shot Playlist Browser (Ctrl+L)")
+        toggle_playlist_act.triggered.connect(self._toggle_playlist_panel)
+        studio_menu.addAction(toggle_playlist_act)
+
+        studio_menu.addSeparator()
+
+        load_kitsu_act = QtGui.QAction("Load Playlist from Kitsu...", self)
+        load_kitsu_act.setToolTip("Connect to Kitsu and load review playlist")
+        load_kitsu_act.triggered.connect(self._on_load_kitsu_playlist)
+        studio_menu.addAction(load_kitsu_act)
+
+        open_kitsu_act = QtGui.QAction("Open Current Shot in Kitsu", self)
+        open_kitsu_act.setShortcut("Ctrl+K")
+        open_kitsu_act.setToolTip("Open current shot / task page in Kitsu web browser (Ctrl+K)")
+        open_kitsu_act.triggered.connect(self._open_current_shot_in_kitsu)
+        studio_menu.addAction(open_kitsu_act)
+
+        publish_kitsu_act = QtGui.QAction("Publish Review Note to Kitsu...", self)
+        publish_kitsu_act.setShortcut("Ctrl+Alt+P")
+        publish_kitsu_act.setToolTip("Submit supervisor review comment, status update & annotated snapshot to Kitsu (Ctrl+Alt+P)")
+        publish_kitsu_act.triggered.connect(self._on_publish_kitsu_review)
+        studio_menu.addAction(publish_kitsu_act)
+
+        studio_menu.addSeparator()
+
+        kitsu_config_act = QtGui.QAction("Configure Kitsu Connection...", self)
+        kitsu_config_act.setToolTip("Set Kitsu host URL and credentials")
+        kitsu_config_act.triggered.connect(self._on_configure_kitsu)
+        studio_menu.addAction(kitsu_config_act)
+
+        # Cache management actions
+        self.kitsu_clear_exit_act = QtGui.QAction("Clear Kitsu Cache on Exit", self)
+        self.kitsu_clear_exit_act.setCheckable(True)
+        self.kitsu_clear_exit_act.setChecked(bool(self.prefs.get("clear_kitsu_cache_on_exit", False)))
+        self.kitsu_clear_exit_act.toggled.connect(self._on_toggle_clear_kitsu_cache_exit)
+        studio_menu.addAction(self.kitsu_clear_exit_act)
+
+        kitsu_clear_now_act = QtGui.QAction("Clear Kitsu Cache Now...", self)
+        kitsu_clear_now_act.setToolTip("Free local storage by deleting all downloaded preview media and thumbnails")
+        kitsu_clear_now_act.triggered.connect(self._on_clear_kitsu_cache_now)
+        studio_menu.addAction(kitsu_clear_now_act)
 
         # Add OCIO controls + Viewer Dropdown to Menu Bar (Corner Widget)
         if self.color_manager.config:
@@ -2084,6 +2432,8 @@ class MainWindow(QtWidgets.QMainWindow):
             
         for c in cores:
             c.loader.set_ocio_params(enabled, input_cs, output_cs, config_path)
+            if hasattr(c, 'color_pipeline'):
+                c.color_pipeline.set_ocio_params(enabled, input_cs, output_cs, config_path)
             with c.cache_lock:
                 c.cache.clear()
                 c.loader.clear_pending()
@@ -2092,6 +2442,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.exposure = float(val / 1000.0)
         if hasattr(self, 'lbl_exp_val'):
             self.lbl_exp_val.setText(f"{self.exposure:+.2f}")
+        if hasattr(self, 'core') and hasattr(self.core, 'color_pipeline'):
+            self.core.color_pipeline.set_grade_params(exposure=self.exposure)
             
         # Refresh current frame with new exposure (no cache clear!)
         if self.core.frame_count():
@@ -2103,6 +2455,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.gamma = float(val / 1000.0)
         if hasattr(self, 'lbl_gam_val'):
             self.lbl_gam_val.setText(f"{self.gamma:.2f}")
+        if hasattr(self, 'core') and hasattr(self.core, 'color_pipeline'):
+            self.core.color_pipeline.set_grade_params(gamma=self.gamma)
             
         # Refresh current frame with new gamma (no cache clear!)
         if self.core.frame_count():
@@ -2129,8 +2483,45 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 self.lbl_channel.setStyleSheet("color: #ff4444; font-weight: bold; font-size: 14px; padding-right: 10px;")
             
+        if hasattr(self, 'viewport'):
+            self.viewport.set_channel_mode(self.channel_mode)
+        if hasattr(self, 'viewports'):
+            for vp in self.viewports:
+                vp.set_channel_mode(self.channel_mode)
+        if hasattr(self, 'core') and hasattr(self.core, 'color_pipeline'):
+            self.core.color_pipeline.set_channel_mode(self.channel_mode)
+
         if self.core.frame_count():
             self._show_frame(self.current_index)
+
+    def _set_alpha_mode(self, mode: str):
+        """Set alpha presentation mode ('RGB', 'Checkerboard', 'Alpha', 'Black', 'White')."""
+        self.alpha_mode = mode
+        if hasattr(self, 'viewport'):
+            self.viewport.set_alpha_mode(mode)
+        if hasattr(self, 'viewports'):
+            for vp in self.viewports:
+                vp.set_alpha_mode(mode)
+        if hasattr(self, 'core') and hasattr(self.core, 'color_pipeline'):
+            self.core.color_pipeline.set_alpha_mode(mode)
+        if hasattr(self, '_alpha_actions'):
+            act = self._alpha_actions.get(mode)
+            if act and not act.isChecked():
+                act.setChecked(True)
+        if hasattr(self, 'lbl_channel'):
+            if mode != 'RGB':
+                self.lbl_channel.setText(f"{self.channel_mode} | {mode[:5]}")
+            else:
+                self.lbl_channel.setText(self.channel_mode)
+        if self.core.frame_count():
+            self._show_frame(self.current_index)
+
+    def _cycle_alpha_mode(self):
+        """Cycle through Alpha display modes (Shift+A)."""
+        modes = ['RGB', 'Checkerboard', 'Alpha', 'Black', 'White']
+        curr = getattr(self, 'alpha_mode', 'RGB')
+        next_idx = (modes.index(curr) + 1) % len(modes) if curr in modes else 0
+        self._set_alpha_mode(modes[next_idx])
 
     def _on_pixel_probe(self, x: float, y: float):
         if not hasattr(self, 'lbl_probe') or not hasattr(self, 'core') or self.core.frame_count() == 0:
@@ -2251,6 +2642,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.annotations[idx].append(stroke)
 
         self._update_annotation_undo_redo_ui()
+        self._auto_save_sidecar()
 
     def _erase_stroke_near(self, eraser_stroke: dict):
         """Remove the topmost stroke that is close to the eraser position."""
@@ -2311,6 +2703,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.annotations[idx].pop(i)
                 self._refresh_annotation_display()
                 self._update_annotation_undo_redo_ui()
+                self._auto_save_sidecar()
                 return
 
     def _annotation_undo(self):
@@ -2328,6 +2721,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.annotations[idx] = prev
         self._refresh_annotation_display()
         self._update_annotation_undo_redo_ui()
+        self._auto_save_sidecar()
 
     def _annotation_redo(self):
         """Redo the last undone annotation action on the current frame."""
@@ -2343,6 +2737,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.annotations[idx] = nxt
         self._refresh_annotation_display()
         self._update_annotation_undo_redo_ui()
+        self._auto_save_sidecar()
 
     def _update_annotation_undo_redo_ui(self):
         """Sync undo/redo button enabled state in the toolbar."""
@@ -2356,9 +2751,353 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_timeline_annotation_markers()
 
     def _update_timeline_annotation_markers(self):
+        self._update_timeline_markers()
+
+    def _update_timeline_markers(self):
+        """Authoritative updater for all markers on the timeline playhead slider."""
         if hasattr(self, 'frame_slider'):
             active_indices = {k for k, v in self.annotations.items() if v}
             self.frame_slider.set_annotated_indices(active_indices)
+            self.frame_slider.set_bookmarks(self.bookmarks)
+            cnt = self.core.frame_count()
+            r_in = getattr(self, 'range_in', 0)
+            r_out = getattr(self, 'range_out', max(0, cnt - 1))
+            self.frame_slider.set_in_out(r_in, r_out)
+            if self.core.media and getattr(self.core.media, 'missing_frames', None):
+                self.frame_slider.set_missing_indices(set(self.core.media.missing_frames))
+
+    def _set_in_point(self):
+        """Set In point at current playhead position."""
+        self.range_in = self.current_index
+        cnt = self.core.frame_count()
+        if getattr(self, 'range_out', 0) < self.range_in:
+            self.range_out = max(self.range_in, max(0, cnt - 1))
+        if hasattr(self, 'range_start_edit'):
+            self.range_start_edit.setText(str(self.range_in))
+        if hasattr(self, 'range_end_edit'):
+            self.range_end_edit.setText(str(self.range_out))
+        self._update_timeline_markers()
+        self._update_status(f"In point set to frame {self.range_in}")
+        self._auto_save_sidecar()
+
+    def _set_out_point(self):
+        """Set Out point at current playhead position."""
+        self.range_out = self.current_index
+        if getattr(self, 'range_in', 0) > self.range_out:
+            self.range_in = min(self.range_out, 0)
+        if hasattr(self, 'range_start_edit'):
+            self.range_start_edit.setText(str(self.range_in))
+        if hasattr(self, 'range_end_edit'):
+            self.range_end_edit.setText(str(self.range_out))
+        self._update_timeline_markers()
+        self._update_status(f"Out point set to frame {self.range_out}")
+        self._auto_save_sidecar()
+
+    def _clear_in_out_range(self):
+        """Reset In and Out points to encompass the entire media clip."""
+        cnt = self.core.frame_count()
+        self.range_in = 0
+        self.range_out = max(0, cnt - 1)
+        if hasattr(self, 'range_start_edit'):
+            self.range_start_edit.setText(str(self.range_in))
+        if hasattr(self, 'range_end_edit'):
+            self.range_end_edit.setText(str(self.range_out))
+        self._update_timeline_markers()
+        self._update_status("In/Out playback range reset to full clip")
+        self._auto_save_sidecar()
+
+    def _toggle_bookmark(self):
+        """Toggle a bookmark marker at the current playhead frame."""
+        idx = self.current_index
+        if idx in self.bookmarks:
+            self.bookmarks.remove(idx)
+            self._update_status(f"Bookmark removed from frame {idx}")
+        else:
+            self.bookmarks.add(idx)
+            self._update_status(f"Bookmark added at frame {idx}")
+        self._update_timeline_markers()
+        self._auto_save_sidecar()
+
+    def _clear_all_bookmarks(self):
+        """Clear all bookmarks across all frames."""
+        self.bookmarks.clear()
+        self._update_timeline_markers()
+        self._update_status("All bookmarks cleared")
+        self._auto_save_sidecar()
+
+    def _auto_save_sidecar(self):
+        """Automatically write review sidecar (.review.json) in background if media is loaded."""
+        if not self.core.media or not self.core.media.path:
+            return
+        try:
+            AnnotationService.save_sidecar(
+                self.core.media.path,
+                self.annotations,
+                bookmarks=self.bookmarks,
+                in_point=getattr(self, 'range_in', None),
+                out_point=getattr(self, 'range_out', None),
+            )
+        except Exception:
+            pass
+
+    def _save_review_sidecar(self):
+        """Explicitly save review sidecar file."""
+        if not self.core.media or not self.core.media.path:
+            QtWidgets.QMessageBox.warning(self, "No Media", "Please load media first.")
+            return
+        try:
+            saved_p = AnnotationService.save_sidecar(
+                self.core.media.path,
+                self.annotations,
+                bookmarks=self.bookmarks,
+                in_point=getattr(self, 'range_in', None),
+                out_point=getattr(self, 'range_out', None),
+            )
+            self._update_status(f"Review sidecar saved: {os.path.basename(saved_p)}")
+            QtWidgets.QMessageBox.information(
+                self, "Sidecar Saved",
+                f"Review sidecar saved successfully:\n{saved_p}"
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Save Error", str(e))
+
+    def _load_review_sidecar(self):
+        """Prompt to load a review sidecar (.review.json)."""
+        if not self.core.media:
+            QtWidgets.QMessageBox.warning(self, "No Media", "Please load media first.")
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Review Sidecar", "", "Review Files (*.review.json *.json);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            data = AnnotationService.load_sidecar(self.core.media.path, source_path=path)
+            if data:
+                self.annotations = data.get("annotations", {})
+                self.bookmarks = set(data.get("bookmarks", []))
+                cnt = self.core.frame_count()
+                if data.get("in_point") is not None:
+                    self.range_in = max(0, min(cnt - 1, data["in_point"]))
+                if data.get("out_point") is not None:
+                    self.range_out = max(self.range_in, min(cnt - 1, data["out_point"]))
+                if hasattr(self, 'range_start_edit'):
+                    self.range_start_edit.setText(str(self.range_in))
+                if hasattr(self, 'range_end_edit'):
+                    self.range_end_edit.setText(str(self.range_out))
+                self._annotation_undo_stack.clear()
+                self._annotation_redo_stack.clear()
+                self._refresh_annotation_display()
+                self._update_timeline_markers()
+                self._update_annotation_undo_redo_ui()
+                self._update_status(f"Review sidecar loaded: {os.path.basename(path)}")
+            else:
+                QtWidgets.QMessageBox.warning(self, "Load Error", "Could not parse review sidecar data.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Load Error", str(e))
+
+    def _update_version_ui(self):
+        """Update window title and status bar with detected shot version information."""
+        if not self.version_group or not self.version_group.versions:
+            return
+        cur_v = self.version_group.current_version
+        total_v = len(self.version_group.versions)
+        shot = self.version_group.shot_name
+        self.setWindowTitle(f"VFX Player — {shot} (v{cur_v:03d} | {cur_v}/{total_v})")
+        if hasattr(self, '_status_base'):
+            self._status_base = f"Loaded: {self.version_group.current_path} [v{cur_v:03d} of {total_v}]"
+            self._update_status(self._status_base)
+
+    def _version_up(self):
+        """Switch to next detected version."""
+        if not self.version_group:
+            self._update_status("No version group detected")
+            return
+        nxt = self.version_group.get_next_version()
+        if nxt:
+            self.load_media(nxt.file_path)
+            self._update_status(f"Switched to version: {nxt.version_string}")
+        else:
+            self._update_status("Already at latest version")
+
+    def _version_down(self):
+        """Switch to previous detected version."""
+        if not self.version_group:
+            self._update_status("No version group detected")
+            return
+        prv = self.version_group.get_prev_version()
+        if prv:
+            self.load_media(prv.file_path)
+            self._update_status(f"Switched to version: {prv.version_string}")
+        else:
+            self._update_status("Already at earliest version")
+
+    def _version_latest(self):
+        """Switch directly to the latest detected version."""
+        if not self.version_group:
+            self._update_status("No version group detected")
+            return
+        latest = self.version_group.latest_version
+        if latest and latest.file_path != self.version_group.current_path:
+            self.load_media(latest.file_path)
+            self._update_status(f"Switched to latest version: {latest.version_string}")
+        else:
+            self._update_status("Already at latest version")
+
+    def _version_compare_prev(self, item=None):
+        """Load previous version into Secondary Track (B) and activate Wipe comparison."""
+        target_path = None
+        ver_label = "previous version"
+
+        # Check local file version detection
+        if item and getattr(item, 'media_path', None):
+            vg = VersionDetector.find_versions(item.media_path)
+            if vg:
+                prv = vg.get_prev_version()
+                if prv:
+                    target_path = prv.file_path
+                    ver_label = prv.version_string
+        elif self.version_group:
+            prv = self.version_group.get_prev_version()
+            if prv:
+                target_path = prv.file_path
+                ver_label = prv.version_string
+
+        # If not found locally, check Kitsu task previews
+        if not target_path:
+            k_item = item or getattr(self, '_current_kitsu_shot', None)
+            task_id = getattr(k_item, 'kitsu_task_id', None) or getattr(k_item, 'task_id', None) if k_item else None
+            if not task_id and k_item and getattr(k_item, 'kitsu_shot_id', None) and kitsu_client.is_authenticated():
+                tasks = kitsu_client.get_tasks_for_shot(k_item.kitsu_shot_id)
+                if tasks:
+                    task_id = tasks[0].get("id")
+
+            if task_id and kitsu_client.is_authenticated():
+                try:
+                    comments = kitsu_client.get_task_comments(task_id)
+                    previews = [c for c in comments if c.get('preview_file_id')]
+                    if len(previews) >= 2:
+                        prev_comment = previews[-2]
+                        pf_id = prev_comment.get('preview_file_id')
+                        target_path = kitsu_client.download_preview_file(preview_file_id=pf_id)
+                        ver_label = f"Kitsu preview ({pf_id[:6]}...)"
+                except Exception as e:
+                    print(f"Kitsu version fetch warning: {e}")
+
+        if not target_path or not os.path.exists(target_path):
+            QtWidgets.QMessageBox.information(self, "Versions", "No previous version or preview found for comparison.")
+            return
+
+        try:
+            self.core_b.load(target_path)
+            self.compare_loaded = True
+            self._set_compare_mode('wipe')
+            self._update_status(f"Comparing current version with {ver_label}")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Compare Error", f"Could not load previous version: {e}")
+
+    def _show_version_compare_dialog(self, item=None):
+        """Display all versions across tasks (Edit, Comp, Lighting, Anim, etc.) for a shot."""
+        target_item = item or getattr(self, '_current_kitsu_shot', None)
+        shot_name = (target_item.shot_name if target_item else None) or (self.core.media.name if self.core.media else "Current Shot")
+        versions: List[Dict[str, Any]] = []
+
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        try:
+            # 1. Query Kitsu versions & tasks if authenticated
+            shot_id = getattr(target_item, 'kitsu_shot_id', None) if target_item else None
+            if not shot_id and kitsu_client.is_authenticated():
+                try:
+                    s_data = kitsu_client.get_shot_by_name(shot_name)
+                    if s_data:
+                        shot_id = s_data.get("id")
+                except Exception:
+                    pass
+
+            if shot_id and kitsu_client.is_authenticated():
+                kitsu_vers = kitsu_client.get_shot_versions_and_tasks(shot_id)
+                if kitsu_vers:
+                    versions.extend(kitsu_vers)
+
+            # 2. Query local disk versions via VersionDetector
+            media_p = getattr(target_item, 'media_path', None) or (self.core.media.path if self.core.media else None)
+            if media_p and os.path.exists(media_p):
+                vg = VersionDetector.find_versions(media_p)
+                if vg and vg.versions:
+                    for vi in vg.versions:
+                        if not any(v.get("media_path") == vi.file_path for v in versions):
+                            versions.append({
+                                "task_name": getattr(target_item, 'task_name', 'Local') or 'Local',
+                                "version_num": vi.version_number,
+                                "version_label": f"{vi.version_string} (Local)",
+                                "media_path": vi.file_path,
+                                "author": "Local Disk",
+                                "created_at": "",
+                                "comment": os.path.basename(vi.file_path),
+                                "status": "Local",
+                            })
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+
+        if not versions:
+            QtWidgets.QMessageBox.information(
+                self, "No Versions Found",
+                f"No additional versions or task renders were found for '{shot_name}'."
+            )
+            return
+
+        dlg = VersionCompareDialog(shot_name=shot_name, versions=versions, parent=self)
+        if dlg.exec() and dlg.selected_action:
+            v_data, mode = dlg.selected_action
+            load_path = None
+            if v_data.get("preview_file_id"):
+                QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+                self.statusBar().showMessage(f"Downloading {v_data.get('version_label')}...", 4000)
+                try:
+                    load_path = kitsu_client.download_preview_file(preview_file_id=v_data["preview_file_id"])
+                finally:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+            elif v_data.get("media_path"):
+                load_path = v_data["media_path"]
+
+            if not load_path or not os.path.exists(load_path):
+                QtWidgets.QMessageBox.warning(self, "Load Error", "Could not load selected version media file.")
+                return
+
+            label = v_data.get("version_label", "Selected version")
+            if mode == "play":
+                self.load_media(load_path)
+                self.statusBar().showMessage(f"Loaded {label} into Main Player", 3000)
+            elif mode in ("wipe", "side-by-side", "split"):
+                self.core_b.load(load_path)
+                self.compare_loaded = True
+                self._set_compare_mode(mode)
+                self.statusBar().showMessage(f"Comparing with {label} ({mode.upper()} mode)", 4000)
+
+    def _toggle_scopes(self):
+        """Show or hide the real-time image scopes dialog."""
+        if self.scopes_dialog is None:
+            self.scopes_dialog = ScopesDialog(self)
+        if self.scopes_dialog.isVisible():
+            self.scopes_dialog.hide()
+        else:
+            self.scopes_dialog.show()
+            self.scopes_dialog.raise_()
+            self.scopes_dialog.activateWindow()
+            frame = self.core.get_frame(self.current_index)
+            if frame is not None:
+                self.scopes_dialog.update_image(frame)
+
+    def _toggle_properties_hud(self):
+        """Toggle file properties HUD visibility."""
+        self.properties_visible = not self.properties_visible
+        if self.properties_visible:
+            if self.core.media:
+                self.props_hud.update_info(self.core.media)
+            self.props_hud.show()
+            self.props_hud.raise_()
+        else:
+            self.props_hud.hide()
 
     def _refresh_annotation_display(self):
         """Redraw current frame annotations in the viewports."""
@@ -2381,6 +3120,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.side_by_side and hasattr(self, 'viewport_b'):
                 self.viewport_b.set_annotations([])
             self._update_annotation_undo_redo_ui()
+            self._auto_save_sidecar()
 
     def _clear_all_annotations(self):
         """Clear annotations on ALL frames."""
@@ -2391,6 +3131,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, 'viewport_b'):
             self.viewport_b.set_annotations([])
         self._update_annotation_undo_redo_ui()
+        self._auto_save_sidecar()
 
     # ─────────────────────────────────────────────────────────────────────
     # File menu: Save Frame / Annotations
@@ -2727,6 +3468,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.frame_slider.set_show_cached(self.prefs.get('show_cached_timeline', True))
             
             self.cinema_mode_enabled = bool(self.prefs.get('cinema_mode_enabled', True))
+
+            # Kitsu credentials & host restore
+            try:
+                _qsettings = QtCore.QSettings("VFXPlayer", "Kitsu")
+                k_host = self.prefs.get('kitsu_host') or _qsettings.value("host", "")
+                k_token = self.prefs.get('kitsu_token') or _qsettings.value("token", "")
+                if k_host:
+                    kitsu_client.host_url = str(k_host)
+                if k_token:
+                    kitsu_client.auth_token = str(k_token)
+            except Exception:
+                pass
                 
         except Exception:
             self.prefs = {}
@@ -2897,18 +3650,78 @@ class MainWindow(QtWidgets.QMainWindow):
             self.range_start_edit.setText(str(self.range_in))
         if hasattr(self, 'range_end_edit'):
             self.range_end_edit.setText(str(self.range_out))
+
+        # Version Detection
+        try:
+            self.version_group = VersionDetector.find_versions(path)
+            self._update_version_ui()
+        except Exception:
+            self.version_group = None
+
+        # Auto-load Persistent Annotations & Bookmarks (.review.json sidecar)
+        try:
+            sidecar = AnnotationService.load_sidecar(path)
+            if sidecar:
+                self.annotations = sidecar.get("annotations", {})
+                self.bookmarks = set(sidecar.get("bookmarks", []))
+                if sidecar.get("in_point") is not None:
+                    self.range_in = max(0, min(cnt - 1, sidecar["in_point"]))
+                if sidecar.get("out_point") is not None:
+                    self.range_out = max(self.range_in, min(cnt - 1, sidecar["out_point"]))
+                if hasattr(self, 'range_start_edit'):
+                    self.range_start_edit.setText(str(self.range_in))
+                if hasattr(self, 'range_end_edit'):
+                    self.range_end_edit.setText(str(self.range_out))
+                self._refresh_annotation_display()
+            else:
+                self.annotations = {}
+                self.bookmarks = set()
+                self._refresh_annotation_display()
+        except Exception:
+            self.annotations = {}
+            self.bookmarks = set()
+
+        self._update_timeline_markers()
         
         # Reset viewport state to force auto-fit when frame loads
         self.viewport._last_shape = None
         self._show_frame(0)
         
         self._status_base = f"Loaded: {path}"
+        if self.version_group and len(self.version_group.versions) > 1:
+            self._status_base += f" (v{self.version_group.current_version:03d}, {len(self.version_group.versions)} versions detected)"
         self._update_status(self._status_base)
         self._update_timer_interval()
 
         # Update HUD if visible or load it for later
         if self.core.media:
             self.props_hud.update_info(self.core.media)
+
+        # Update Kitsu shot context if not already assigned by playlist
+        if not getattr(self, '_current_kitsu_shot', None) or self._current_kitsu_shot.media_path != path:
+            p_ctx = kitsu_client.parse_shot_context(path)
+            self._current_kitsu_shot = PlaylistItem(
+                media_path=path,
+                sequence_name=p_ctx.get('sequence'),
+                shot_name=p_ctx.get('shot'),
+                task_name=p_ctx.get('task'),
+                version=p_ctx.get('version'),
+                frame_count=cnt,
+                fps=self.core.media_fps() or 24.0
+            )
+
+        # Keep playlist in sync: Auto-scan sibling clips in folder so PageUp/PageDown works by default
+        if hasattr(self, 'playlist_service') and hasattr(self, 'playlist_widget'):
+            if getattr(self, '_custom_playlist_active', False):
+                existing_idx = -1
+                for i, it in enumerate(self.playlist_service.items):
+                    if it.media_path == path:
+                        existing_idx = i
+                        break
+                if existing_idx >= 0:
+                    self.playlist_widget.set_current_index(existing_idx)
+            else:
+                self._auto_populate_folder_playlist(path)
 
         # Audio: attach source for video files
         self._audio_attach(path)
@@ -2921,6 +3734,91 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, 'cinema_mode_enabled', True):
             self._set_frameless(True)
             self._hide_ui_controls()
+
+    def _auto_populate_folder_playlist(self, current_path: str):
+        """
+        Auto-populates the playlist with sibling videos and image sequences in the same folder,
+        ensuring PageUp/PageDown works seamlessly out of the box for any opened file.
+        """
+        if getattr(self, '_loading_from_playlist', False):
+            for i, it in enumerate(self.playlist_service.items):
+                if it.media_path == current_path:
+                    self.playlist_widget.set_current_index(i)
+                    break
+            return
+
+        is_url = current_path.startswith("http://") or current_path.startswith("https://")
+        if is_url or not os.path.exists(current_path):
+            return
+
+        import re
+        from core.player_core import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, detect_image_sequence
+
+        abs_path = os.path.abspath(current_path)
+        folder = os.path.dirname(abs_path)
+        if not os.path.isdir(folder):
+            return
+
+        try:
+            entries = sorted(os.listdir(folder))
+        except OSError:
+            return
+
+        items: List[PlaylistItem] = []
+        processed_bases = set()
+        current_idx = 0
+
+        for f in entries:
+            full_p = os.path.join(folder, f)
+            if not os.path.isfile(full_p):
+                continue
+            ext = os.path.splitext(f)[1].lower()
+            if ext in VIDEO_EXTENSIONS:
+                ctx = kitsu_client.parse_shot_context(full_p)
+                shot_name = ctx.get("shot") or os.path.splitext(f)[0]
+                item = PlaylistItem(
+                    media_path=full_p,
+                    name=f,
+                    sequence=ctx.get("sequence", ""),
+                    shot=shot_name,
+                    task=ctx.get("task", ""),
+                    version=ctx.get("version", "")
+                )
+                items.append(item)
+            elif ext in IMAGE_EXTENSIONS:
+                base = os.path.splitext(f)[0]
+                base_key = re.sub(r'\d+$', '', base)
+                if base_key in processed_bases:
+                    continue
+                processed_bases.add(base_key)
+
+                seq = detect_image_sequence(full_p)
+                first_f = seq[0] if seq else full_p
+                ctx = kitsu_client.parse_shot_context(first_f)
+                shot_name = ctx.get("shot") or re.sub(r'[._-]\d+$', '', os.path.splitext(os.path.basename(first_f))[0])
+                item = PlaylistItem(
+                    media_path=first_f,
+                    name=shot_name,
+                    sequence=ctx.get("sequence", ""),
+                    shot=shot_name,
+                    task=ctx.get("task", ""),
+                    version=ctx.get("version", ""),
+                    frame_count=len(seq) if seq else 1
+                )
+                items.append(item)
+
+        if items:
+            cur_base = re.sub(r'\d+$', '', os.path.splitext(os.path.basename(abs_path))[0])
+            for idx, it in enumerate(items):
+                it_base = re.sub(r'\d+$', '', os.path.splitext(os.path.basename(it.media_path))[0])
+                if it.media_path == abs_path or it_base == cur_base:
+                    current_idx = idx
+                    break
+
+            self.playlist_service.items = items
+            self.playlist_service.active_index = current_idx
+            self.playlist_widget.refresh()
+            self.playlist_widget.set_current_index(current_idx)
 
     def _set_frameless(self, frameless: bool):
         if getattr(self, '_is_frameless', False) == frameless or getattr(self, 'fullscreen', False):
@@ -3093,6 +3991,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.viewport.set_exposure(self.exposure)
         self.viewport.set_gamma(self.gamma)
         self.viewport.set_channel_mode(self.channel_mode)
+        self.viewport.set_alpha_mode(getattr(self, 'alpha_mode', 'RGB'))
+        if hasattr(self.core, 'color_pipeline'):
+            self.core.color_pipeline.set_grade_params(exposure=self.exposure, gamma=self.gamma)
+        
+        if hasattr(self, 'scopes_dialog') and self.scopes_dialog and self.scopes_dialog.isVisible():
+            self.scopes_dialog.update_image(active_frame)
         
         self.frame_slider.blockSignals(True)
         self.frame_slider.setValue(index)
@@ -3129,6 +4033,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.viewport.set_exposure(self.exposure)
                 self.viewport.set_gamma(self.gamma)
                 self.viewport.set_channel_mode(self.channel_mode)
+                self.viewport.set_alpha_mode(getattr(self, 'alpha_mode', 'RGB'))
 
         # Update and sync all visible secondary/grid viewports
         for v_idx, vp in enumerate(self.viewports):
@@ -3145,6 +4050,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         vp.set_exposure(self.exposure)
                         vp.set_gamma(self.gamma)
                         vp.set_channel_mode(self.channel_mode)
+                        vp.set_alpha_mode(getattr(self, 'alpha_mode', 'RGB'))
                         
                 if getattr(self, 'btn_annotate', None) and self.btn_annotate.isChecked():
                     strokes = self.annotations.get(index, [])
@@ -3201,6 +4107,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     pos_ms = int(r_in * 1000.0 / fps)
                     self._audio_player.setPosition(pos_ms)
             else:
+                # Check if playlist has a next shot to play continuously
+                if hasattr(self, 'playlist_service') and len(self.playlist_service.items) > 1:
+                    if self.playlist_service.has_next() or self.playlist_service.loop:
+                        self._playlist_seamless_next()
+                        return  # Handled seamlessly by _playlist_seamless_next
                 next_idx = r_out
                 self.pause()
                 return  # Stop advancement
@@ -3541,7 +4452,27 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Total Frames badge
         cnt = self.core.frame_count()
-        self.status_frames_badge.setText(f"{cnt} Frames")
+        missing = getattr(self.core.media, 'missing_frames', []) if self.core.media else []
+        if missing:
+            self.status_frames_badge.setText(f"{cnt} Frames (⚠️ {len(missing)} Missing)")
+            self.status_frames_badge.setStyleSheet("""
+                background-color: rgba(255, 69, 58, 0.15);
+                border: 1px solid rgba(255, 69, 58, 0.4);
+                border-radius: 4px;
+                color: #ff453a;
+                padding: 2px 7px;
+                font-family: 'SF Mono', Consolas, monospace;
+                font-size: 11px;
+                font-weight: 600;
+            """)
+            missing_preview = ", ".join(str(m) for m in missing[:8])
+            if len(missing) > 8:
+                missing_preview += f" ... (+{len(missing)-8} more)"
+            self.status_frames_badge.setToolTip(f"Missing Frames in Sequence: {missing_preview}")
+        else:
+            self.status_frames_badge.setText(f"{cnt} Frames")
+            self.status_frames_badge.setStyleSheet(getattr(self, '_mono_badge_style', ''))
+            self.status_frames_badge.setToolTip("Total Frames in Sequence")
 
         # FPS badge
         self.status_fps_badge.setText(f"{fps:.2f} fps")
@@ -3555,14 +4486,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.frame_slider.set_cached_indices(self.core.get_cached_indices())
 
     def _format_timecode(self, frame: int, fps: float) -> str:
-        if fps <= 0:
-            return "--:--:--:--"
-        total_seconds = int(frame / fps)
-        ff = int(frame % fps)
-        hh = total_seconds // 3600
-        mm = (total_seconds % 3600) // 60
-        ss = total_seconds % 60
-        return f"{hh:02d}:{mm:02d}:{ss:02d}:{ff:02d}"
+        if hasattr(self.core, 'media') and self.core.media and getattr(self.core.media, 'timeline', None):
+            return self.core.media.timeline.format_timecode(frame)
+        from core.timeline_service import frame_to_timecode
+        return frame_to_timecode(frame, fps)
 
     # ---------- Cache capacity controls ----------
     def _set_cache_capacity_dialog(self):
@@ -3801,8 +4728,8 @@ class MainWindow(QtWidgets.QMainWindow):
         key = event.key()
         mods = event.modifiers()
 
-        # Annotation mode shortcuts: N or Shift+A or Alt+A
-        if key == QtCore.Qt.Key.Key_N or (key == QtCore.Qt.Key.Key_A and bool(mods & (QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.KeyboardModifier.AltModifier))):
+        # Annotation mode shortcuts: N or Alt+A
+        if key == QtCore.Qt.Key.Key_N or (key == QtCore.Qt.Key.Key_A and bool(mods & QtCore.Qt.KeyboardModifier.AltModifier)):
             self._toggle_annotate_mode()
             event.accept()
             return
@@ -3822,8 +4749,38 @@ class MainWindow(QtWidgets.QMainWindow):
             event.accept()
             return
 
+        # Playlist and Studio Shortcuts
+        if key == QtCore.Qt.Key.Key_PageUp:
+            self.playlist_prev_shot()
+            event.accept()
+            return
+        elif key == QtCore.Qt.Key.Key_PageDown:
+            self.playlist_next_shot()
+            event.accept()
+            return
+        elif key == QtCore.Qt.Key.Key_L and bool(mods & QtCore.Qt.KeyboardModifier.ControlModifier):
+            self._toggle_playlist_panel()
+            event.accept()
+            return
+        elif key == QtCore.Qt.Key.Key_K and bool(mods & QtCore.Qt.KeyboardModifier.ControlModifier):
+            self._open_current_shot_in_kitsu()
+            event.accept()
+            return
+        elif key == QtCore.Qt.Key.Key_P and bool(mods & QtCore.Qt.KeyboardModifier.ControlModifier) and bool(mods & QtCore.Qt.KeyboardModifier.AltModifier):
+            self._on_publish_kitsu_review()
+            event.accept()
+            return
+        elif key == QtCore.Qt.Key.Key_F and bool(mods & QtCore.Qt.KeyboardModifier.ControlModifier) and bool(mods & QtCore.Qt.KeyboardModifier.AltModifier):
+            if hasattr(self, 'false_color_action'):
+                self.false_color_action.trigger()
+            event.accept()
+            return
+
         if key == QtCore.Qt.Key.Key_Escape:
-            self.close()
+            if getattr(self, 'fullscreen', False):
+                self._toggle_fullscreen(False)
+            elif getattr(self.viewport, 'is_drawing', False):
+                self._toggle_annotate_mode()
             event.accept()
             return
         elif key == QtCore.Qt.Key.Key_Tab:
@@ -3854,9 +4811,15 @@ class MainWindow(QtWidgets.QMainWindow):
         elif key == QtCore.Qt.Key.Key_G:
             self._set_channel('G')
         elif key == QtCore.Qt.Key.Key_B:
-            self._set_channel('B')
+            if mods & QtCore.Qt.KeyboardModifier.ControlModifier:
+                self._set_channel('B')
+            else:
+                self._toggle_bookmark()
         elif key == QtCore.Qt.Key.Key_A:
-            self._set_channel('A')
+            if mods & QtCore.Qt.KeyboardModifier.ShiftModifier:
+                self._cycle_alpha_mode()
+            else:
+                self._set_channel('A')
         elif key == QtCore.Qt.Key.Key_S:
             # Toggle Side-by-Side on/off
             if self.side_by_side and not self.wipe_mode:
@@ -3870,15 +4833,27 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 self._set_compare_mode('wipe')
         elif key == QtCore.Qt.Key.Key_I:
-            # Toggle File Properties HUD
-            self.properties_visible = not self.properties_visible
-            if self.properties_visible:
-                if self.core.media:
-                    self.props_hud.update_info(self.core.media)
-                self.props_hud.show()
-                self.props_hud.raise_()
+            if mods & QtCore.Qt.KeyboardModifier.ControlModifier:
+                self._toggle_properties_hud()
             else:
-                self.props_hud.hide()
+                self._set_in_point()
+        elif key == QtCore.Qt.Key.Key_O:
+            if (mods & QtCore.Qt.KeyboardModifier.ControlModifier) or (mods & QtCore.Qt.KeyboardModifier.AltModifier):
+                if hasattr(self, 'ocio_enable_btn'):
+                    self.ocio_enable_btn.toggle()
+            else:
+                self._set_out_point()
+        elif key == QtCore.Qt.Key.Key_X:
+            self._clear_in_out_range()
+        elif key == QtCore.Qt.Key.Key_H and (mods & QtCore.Qt.KeyboardModifier.ControlModifier):
+            self._toggle_scopes()
+        elif key == QtCore.Qt.Key.Key_Up and (mods & QtCore.Qt.KeyboardModifier.ControlModifier):
+            if mods & QtCore.Qt.KeyboardModifier.ShiftModifier:
+                self._version_latest()
+            else:
+                self._version_up()
+        elif key == QtCore.Qt.Key.Key_Down and (mods & QtCore.Qt.KeyboardModifier.ControlModifier):
+            self._version_down()
         elif key == QtCore.Qt.Key.Key_E:
             # Cycle Playback Strategy
             current = self.core.strategy
@@ -3888,8 +4863,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_playback_strategy(next_strat)
         elif key == QtCore.Qt.Key.Key_M:
             self._toggle_mute()
-        elif key == QtCore.Qt.Key.Key_O and hasattr(self, 'ocio_enable_btn'):
-            self.ocio_enable_btn.toggle()
         elif key == QtCore.Qt.Key.Key_Right:
             if event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier:
                 self._jump_to_next_annotated_frame()
@@ -3951,17 +4924,28 @@ class MainWindow(QtWidgets.QMainWindow):
         elif key in (QtCore.Qt.Key.Key_Equal, QtCore.Qt.Key.Key_Plus) and not (event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier):
             self.exp_slider.setValue(self.exp_slider.value() + 250)
 
-        # --- Zoom Shortcuts (Ctrl + / -) ---
+        # --- Zoom Shortcuts (Ctrl + / -, / or \ to reset) ---
+        elif key in (QtCore.Qt.Key.Key_Slash, QtCore.Qt.Key.Key_Backslash):
+            self.viewport.fit_to_window()
+            if hasattr(self, 'viewport_b') and self.viewport_b:
+                self.viewport_b.fit_to_window()
+            self._update_zoom_label()
+            event.accept()
+            return
         elif key in (QtCore.Qt.Key.Key_Plus, QtCore.Qt.Key.Key_Equal) and (event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier):
-            self.viewport.set_zoom(self.viewport._zoom * 1.1)
+            curr = getattr(self.viewport, 'current_zoom', getattr(self.viewport, '_zoom', 1.0))
+            self.viewport.set_zoom(curr * 1.2)
             self._update_zoom_label()
         elif key in (QtCore.Qt.Key.Key_Minus, QtCore.Qt.Key.Key_Underscore) and (event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier):
-            self.viewport.set_zoom(self.viewport._zoom / 1.1)
+            curr = getattr(self.viewport, 'current_zoom', getattr(self.viewport, '_zoom', 1.0))
+            self.viewport.set_zoom(curr / 1.2)
             self._update_zoom_label()
         elif key == QtCore.Qt.Key.Key_F:
             # Fullscreen toggle via F; Shift+F for fit
             if event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier:
                 self.viewport.fit_to_window()
+                if hasattr(self, 'viewport_b') and self.viewport_b:
+                    self.viewport_b.fit_to_window()
                 self._update_zoom_label()
             else:
                 self._toggle_fullscreen(not self.fullscreen)
@@ -3974,6 +4958,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._navigate_folder(-1)  # Previous media in folder
         else:
             event.ignore()
+
+    def _update_zoom_label(self):
+        zoom_val = getattr(self.viewport, 'current_zoom', getattr(self.viewport, '_zoom', 1.0))
+        zoom_pct = int(round(zoom_val * 100))
+        self._update_status(f"Zoom: {zoom_pct}%")
 
     def _toggle_fullscreen(self, enable: bool):
         self.fullscreen = enable
@@ -4082,29 +5071,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, 'viewport_b') and self.viewport_b:
             self.viewport_b.set_guides_config(c, t, a, ti)
 
+    def _get_marked_frames(self) -> list[int]:
+        active_annots = {k for k, v in self.annotations.items() if v}
+        return sorted(list(active_annots | self.bookmarks))
+
     def _jump_to_next_annotated_frame(self):
-        if not self.annotations:
+        targets = self._get_marked_frames()
+        if not targets:
             return
-        active_indices = sorted([k for k, v in self.annotations.items() if v])
-        if not active_indices:
-            return
-        next_frames = [idx for idx in active_indices if idx > self.current_index]
+        next_frames = [idx for idx in targets if idx > self.current_index]
         if next_frames:
             self.seek(next_frames[0])
         else:
-            self.seek(active_indices[0])
+            self.seek(targets[0])
 
     def _jump_to_prev_annotated_frame(self):
-        if not self.annotations:
+        targets = self._get_marked_frames()
+        if not targets:
             return
-        active_indices = sorted([k for k, v in self.annotations.items() if v])
-        if not active_indices:
-            return
-        prev_frames = [idx for idx in active_indices if idx < self.current_index]
+        prev_frames = [idx for idx in targets if idx < self.current_index]
         if prev_frames:
             self.seek(prev_frames[-1])
         else:
-            self.seek(active_indices[-1])
+            self.seek(targets[-1])
 
     def _export_contact_sheet(self):
         import time
@@ -4370,10 +5359,29 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_frame(self.current_index)
 
     def _load_media_slot(self, slot_idx: int):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, f"Load Slot {slot_idx + 1} Media", "", "Media Files (*.*)")
+        media_filter = (
+            "All Supported Media (*.exr *.sxr *.tif *.tiff *.dpx *.cin *.png *.jpg *.jpeg *.mov *.mp4 *.avi *.mkv *.mxf *.webm);;"
+            "Image Sequences (*.exr *.sxr *.tif *.tiff *.dpx *.cin *.png *.jpg *.jpeg *.tga *.bmp *.webp);;"
+            "Video Files (*.mov *.mp4 *.avi *.mkv *.mxf *.webm *.m4v *.flv *.ts);;"
+            "All Files (*.*)"
+        )
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, f"Load Slot {slot_idx + 1} Media", "", media_filter)
         if not path:
             return
-        
+        self.load_media_into_slot(slot_idx, path)
+
+    def load_media_into_slot(self, slot_idx: int, path: str):
+        """
+        Loads a video file or image sequence directly into a specific layout slot (0-5).
+        Enables multi-viewport drag-and-drop targeting any tile in single, 4-up, or 6-up grids.
+        """
+        if slot_idx == 0:
+            self.load_media(path)
+            return
+
+        if not (0 <= slot_idx < len(self.cores)):
+            return
+
         core = self.cores[slot_idx]
         try:
             core.load(path)
@@ -4389,16 +5397,15 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Load Error", f"Failed to load slot {slot_idx + 1}: {e}")
             return
             
-        if slot_idx == 0:
-            self._media_loaded = True
-            fc = core.frame_count()
-            self.range_start_edit.setText("0")
-            self.range_end_edit.setText(str(fc - 1))
-            self.frame_slider.setRange(0, fc - 1)
-            self._configure_frame_slider_ticks()
-        elif slot_idx == 1:
+        if slot_idx == 1:
             self.compare_loaded = True
-            
+            if getattr(self, 'grid_mode', 'single') == 'single' and not self.wipe_mode:
+                self._set_compare_mode('side')
+
+        # Ensure viewport is visible if in grid mode
+        if slot_idx < len(self.viewports):
+            self.viewports[slot_idx].show()
+
         self.status.showMessage(f"Loaded media into Slot {slot_idx + 1}: {os.path.basename(path)}", 3000)
         self._show_frame(self.current_index)
 
@@ -4406,7 +5413,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if checked is None:
             checked = not self.color_grading_panel.isVisible()
         self.color_grading_panel.setVisible(checked)
-        self.grade_panel_action.setChecked(checked)
+        if hasattr(self, 'grade_panel_action'):
+            self.grade_panel_action.blockSignals(True)
+            self.grade_panel_action.setChecked(checked)
+            self.grade_panel_action.blockSignals(False)
+        if hasattr(self, 'btn_grade'):
+            self.btn_grade.blockSignals(True)
+            self.btn_grade.setChecked(checked)
+            self.btn_grade.blockSignals(False)
 
     def _build_color_grading_panel(self):
         self.color_grading_panel = QtWidgets.QFrame()
@@ -4468,10 +5482,19 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(12)
 
-        # Title
+        # Header Title + Close button
+        hdr_box = QtWidgets.QHBoxLayout()
         title_lbl = QtWidgets.QLabel("ASC CDL COLOR GRADE")
         title_lbl.setStyleSheet("font-size: 12px; font-weight: bold; color: #0a84ff; letter-spacing: 1px;")
-        layout.addWidget(title_lbl)
+        hdr_box.addWidget(title_lbl)
+        hdr_box.addStretch()
+        btn_close = QtWidgets.QPushButton("✕")
+        btn_close.setFixedSize(20, 20)
+        btn_close.setStyleSheet("padding: 0; font-size: 10px; background: transparent; border: none; color: #888;")
+        btn_close.setToolTip("Close Grading Panel")
+        btn_close.clicked.connect(lambda: self._toggle_grade_panel(False))
+        hdr_box.addWidget(btn_close)
+        layout.addLayout(hdr_box)
 
         # Scroll Area for controls
         scroll = QtWidgets.QScrollArea()
@@ -4483,52 +5506,58 @@ class MainWindow(QtWidgets.QMainWindow):
         scroll_layout = QtWidgets.QVBoxLayout(scroll_content)
         scroll_layout.setContentsMargins(0, 0, 0, 0)
         scroll_layout.setSpacing(10)
-        
+
         self.cdl_controls = {} # Store controls references
 
         # Helper to build a channel row (Label, Slider, Spinbox)
-        def add_channel_row(parent_layout, label_text, key, min_val, max_val, default_val):
+        def add_channel_row(parent_layout, label_text, key, min_val, max_val, default_val, section=None):
             row_layout = QtWidgets.QHBoxLayout()
             row_layout.setSpacing(6)
-            
+
             lbl = QtWidgets.QLabel(label_text)
             lbl.setFixedWidth(15)
-            # Custom coloring for R, G, B labels
+            # Custom coloring for R, G, B, S labels
             if label_text == "R": lbl.setStyleSheet("color: #ff453a; font-weight: bold;")
             elif label_text == "G": lbl.setStyleSheet("color: #34c759; font-weight: bold;")
             elif label_text == "B": lbl.setStyleSheet("color: #0a84ff; font-weight: bold;")
-            
+            elif label_text == "S": lbl.setStyleSheet("color: #ff9500; font-weight: bold;")
+
             spin = QtWidgets.QDoubleSpinBox()
             spin.setRange(min_val, max_val)
+            spin.setDecimals(3)
             spin.setSingleStep(0.05)
             spin.setValue(default_val)
-            spin.setFixedWidth(55)
-            
+            spin.setFixedWidth(62)
+
             slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
             slider.setRange(int(min_val * 1000), int(max_val * 1000))
             slider.setValue(int(default_val * 1000))
-            
+
             # Sync slider and spinbox
             def on_spin_val(val):
                 slider.blockSignals(True)
                 slider.setValue(int(val * 1000))
                 slider.blockSignals(False)
+                if section:
+                    self._sync_wheel_from_controls(section)
                 self._on_cdl_changed()
-                
+
             def on_slider_val(val):
                 spin.blockSignals(True)
                 spin.setValue(val / 1000.0)
                 spin.blockSignals(False)
+                if section:
+                    self._sync_wheel_from_controls(section)
                 self._on_cdl_changed()
-                
+
             spin.valueChanged.connect(on_spin_val)
             slider.valueChanged.connect(on_slider_val)
-            
+
             row_layout.addWidget(lbl)
             row_layout.addWidget(slider)
             row_layout.addWidget(spin)
             parent_layout.addLayout(row_layout)
-            
+
             self.cdl_controls[key] = (slider, spin, default_val)
 
         # Helper to build a CDL section header
@@ -4545,30 +5574,60 @@ class MainWindow(QtWidgets.QMainWindow):
             hdr_layout.addWidget(btn_reset)
             parent_layout.addLayout(hdr_layout)
 
-        # --- SLOPE ---
+        # --- SLOPE (GAIN) ---
         add_section_header(scroll_layout, "Slope (Gain)", self._reset_slope)
-        add_channel_row(scroll_layout, "R", "slope_r", 0.0, 4.0, 1.0)
-        add_channel_row(scroll_layout, "G", "slope_g", 0.0, 4.0, 1.0)
-        add_channel_row(scroll_layout, "B", "slope_b", 0.0, 4.0, 1.0)
-        scroll_layout.addSpacing(4)
+        slope_wheel_box = QtWidgets.QHBoxLayout()
+        slope_wheel_box.setContentsMargins(0, 2, 0, 4)
+        slope_wheel_box.addStretch()
+        self.wheel_slope = ColorWheelWidget(wheel_radius=40)
+        self.wheel_slope.setToolTip("Slope / Gain Balance: Tint highlights [Shift=Fine, 2xClick=Center]")
+        self.wheel_slope.balance_changed.connect(lambda x, y: self._on_wheel_balance_changed("slope", x, y))
+        slope_wheel_box.addWidget(self.wheel_slope)
+        slope_wheel_box.addStretch()
+        scroll_layout.addLayout(slope_wheel_box)
 
-        # --- OFFSET ---
+        add_channel_row(scroll_layout, "R", "slope_r", 0.0, 4.0, 1.0, section="slope")
+        add_channel_row(scroll_layout, "G", "slope_g", 0.0, 4.0, 1.0, section="slope")
+        add_channel_row(scroll_layout, "B", "slope_b", 0.0, 4.0, 1.0, section="slope")
+        scroll_layout.addSpacing(6)
+
+        # --- OFFSET (LIFT) ---
         add_section_header(scroll_layout, "Offset (Lift)", self._reset_offset)
-        add_channel_row(scroll_layout, "R", "offset_r", -1.0, 1.0, 0.0)
-        add_channel_row(scroll_layout, "G", "offset_g", -1.0, 1.0, 0.0)
-        add_channel_row(scroll_layout, "B", "offset_b", -1.0, 1.0, 0.0)
-        scroll_layout.addSpacing(4)
+        offset_wheel_box = QtWidgets.QHBoxLayout()
+        offset_wheel_box.setContentsMargins(0, 2, 0, 4)
+        offset_wheel_box.addStretch()
+        self.wheel_offset = ColorWheelWidget(wheel_radius=40)
+        self.wheel_offset.setToolTip("Offset / Lift Balance: Tint shadows [Shift=Fine, 2xClick=Center]")
+        self.wheel_offset.balance_changed.connect(lambda x, y: self._on_wheel_balance_changed("offset", x, y))
+        offset_wheel_box.addWidget(self.wheel_offset)
+        offset_wheel_box.addStretch()
+        scroll_layout.addLayout(offset_wheel_box)
 
-        # --- POWER ---
+        add_channel_row(scroll_layout, "R", "offset_r", -1.0, 1.0, 0.0, section="offset")
+        add_channel_row(scroll_layout, "G", "offset_g", -1.0, 1.0, 0.0, section="offset")
+        add_channel_row(scroll_layout, "B", "offset_b", -1.0, 1.0, 0.0, section="offset")
+        scroll_layout.addSpacing(6)
+
+        # --- POWER (GAMMA) ---
         add_section_header(scroll_layout, "Power (Gamma)", self._reset_power)
-        add_channel_row(scroll_layout, "R", "power_r", 0.1, 4.0, 1.0)
-        add_channel_row(scroll_layout, "G", "power_g", 0.1, 4.0, 1.0)
-        add_channel_row(scroll_layout, "B", "power_b", 0.1, 4.0, 1.0)
-        scroll_layout.addSpacing(4)
+        power_wheel_box = QtWidgets.QHBoxLayout()
+        power_wheel_box.setContentsMargins(0, 2, 0, 4)
+        power_wheel_box.addStretch()
+        self.wheel_power = ColorWheelWidget(wheel_radius=40)
+        self.wheel_power.setToolTip("Power / Gamma Balance: Tint midtones [Shift=Fine, 2xClick=Center]")
+        self.wheel_power.balance_changed.connect(lambda x, y: self._on_wheel_balance_changed("power", x, y))
+        power_wheel_box.addWidget(self.wheel_power)
+        power_wheel_box.addStretch()
+        scroll_layout.addLayout(power_wheel_box)
+
+        add_channel_row(scroll_layout, "R", "power_r", 0.1, 4.0, 1.0, section="power")
+        add_channel_row(scroll_layout, "G", "power_g", 0.1, 4.0, 1.0, section="power")
+        add_channel_row(scroll_layout, "B", "power_b", 0.1, 4.0, 1.0, section="power")
+        scroll_layout.addSpacing(6)
 
         # --- SATURATION ---
         add_section_header(scroll_layout, "Saturation", self._reset_sat)
-        add_channel_row(scroll_layout, "S", "sat", 0.0, 4.0, 1.0)
+        add_channel_row(scroll_layout, "S", "sat", 0.0, 4.0, 1.0, section=None)
 
         scroll.setWidget(scroll_content)
         layout.addWidget(scroll, 1)
@@ -4576,11 +5635,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- BOTTOM ACTIONS PANEL ---
         bottom_box = QtWidgets.QVBoxLayout()
         bottom_box.setSpacing(6)
-        
+
         btn_reset_all = QtWidgets.QPushButton("Reset All Grades")
         btn_reset_all.clicked.connect(self._reset_all_cdl)
         bottom_box.addWidget(btn_reset_all)
-        
+
         io_box = QtWidgets.QHBoxLayout()
         io_box.setSpacing(6)
         btn_import = QtWidgets.QPushButton("Import CDL...")
@@ -4590,42 +5649,156 @@ class MainWindow(QtWidgets.QMainWindow):
         io_box.addWidget(btn_import)
         io_box.addWidget(btn_export)
         bottom_box.addLayout(io_box)
-        
+
         layout.addLayout(bottom_box)
         self.color_grading_panel.hide()
 
+    def _on_wheel_balance_changed(self, section: str, x: float, y: float):
+        if getattr(self, '_updating_cdl_internal', False):
+            return
+        self._updating_cdl_internal = True
+        try:
+            dr = x
+            dg = -0.5 * x + 0.866025 * y
+            db = -0.5 * x - 0.866025 * y
+
+            if section == "slope":
+                r_spin = self.cdl_controls["slope_r"][1]
+                g_spin = self.cdl_controls["slope_g"][1]
+                b_spin = self.cdl_controls["slope_b"][1]
+                mean = (r_spin.value() + g_spin.value() + b_spin.value()) / 3.0
+                scale = 0.5
+                r_spin.setValue(max(0.0, min(4.0, mean + scale * dr)))
+                g_spin.setValue(max(0.0, min(4.0, mean + scale * dg)))
+                b_spin.setValue(max(0.0, min(4.0, mean + scale * db)))
+            elif section == "offset":
+                r_spin = self.cdl_controls["offset_r"][1]
+                g_spin = self.cdl_controls["offset_g"][1]
+                b_spin = self.cdl_controls["offset_b"][1]
+                mean = (r_spin.value() + g_spin.value() + b_spin.value()) / 3.0
+                scale = 0.25
+                r_spin.setValue(max(-1.0, min(1.0, mean + scale * dr)))
+                g_spin.setValue(max(-1.0, min(1.0, mean + scale * dg)))
+                b_spin.setValue(max(-1.0, min(1.0, mean + scale * db)))
+            elif section == "power":
+                r_spin = self.cdl_controls["power_r"][1]
+                g_spin = self.cdl_controls["power_g"][1]
+                b_spin = self.cdl_controls["power_b"][1]
+                mean = (r_spin.value() + g_spin.value() + b_spin.value()) / 3.0
+                scale = 0.4
+                r_spin.setValue(max(0.1, min(4.0, mean + scale * dr)))
+                g_spin.setValue(max(0.1, min(4.0, mean + scale * dg)))
+                b_spin.setValue(max(0.1, min(4.0, mean + scale * db)))
+        finally:
+            self._updating_cdl_internal = False
+        self._on_cdl_changed()
+
+    def _sync_wheel_from_controls(self, section: str):
+        if getattr(self, '_updating_cdl_internal', False):
+            return
+        self._updating_cdl_internal = True
+        try:
+            if section == "slope" and hasattr(self, "wheel_slope"):
+                r = self.cdl_controls["slope_r"][1].value()
+                g = self.cdl_controls["slope_g"][1].value()
+                b = self.cdl_controls["slope_b"][1].value()
+                mean = (r + g + b) / 3.0
+                dr, dg, db = r - mean, g - mean, b - mean
+                scale = 0.5
+                x = (2.0 * dr - dg - db) / (3.0 * scale)
+                y = (dg - db) / (1.7320508 * scale)
+                self.wheel_slope.set_balance(x, y, emit_signal=False)
+            elif section == "offset" and hasattr(self, "wheel_offset"):
+                r = self.cdl_controls["offset_r"][1].value()
+                g = self.cdl_controls["offset_g"][1].value()
+                b = self.cdl_controls["offset_b"][1].value()
+                mean = (r + g + b) / 3.0
+                dr, dg, db = r - mean, g - mean, b - mean
+                scale = 0.25
+                x = (2.0 * dr - dg - db) / (3.0 * scale)
+                y = (dg - db) / (1.7320508 * scale)
+                self.wheel_offset.set_balance(x, y, emit_signal=False)
+            elif section == "power" and hasattr(self, "wheel_power"):
+                r = self.cdl_controls["power_r"][1].value()
+                g = self.cdl_controls["power_g"][1].value()
+                b = self.cdl_controls["power_b"][1].value()
+                mean = (r + g + b) / 3.0
+                dr, dg, db = r - mean, g - mean, b - mean
+                scale = 0.4
+                x = (2.0 * dr - dg - db) / (3.0 * scale)
+                y = (dg - db) / (1.7320508 * scale)
+                self.wheel_power.set_balance(x, y, emit_signal=False)
+        finally:
+            self._updating_cdl_internal = False
+
     def _reset_slope(self):
         for key in ("slope_r", "slope_g", "slope_b"):
-            self.cdl_controls[key][1].setValue(self.cdl_controls[key][2])
-            
+            if key in self.cdl_controls:
+                self.cdl_controls[key][1].setValue(self.cdl_controls[key][2])
+        if hasattr(self, "wheel_slope"):
+            self.wheel_slope.set_balance(0.0, 0.0, emit_signal=False)
+        self._on_cdl_changed()
+
     def _reset_offset(self):
         for key in ("offset_r", "offset_g", "offset_b"):
-            self.cdl_controls[key][1].setValue(self.cdl_controls[key][2])
-            
+            if key in self.cdl_controls:
+                self.cdl_controls[key][1].setValue(self.cdl_controls[key][2])
+        if hasattr(self, "wheel_offset"):
+            self.wheel_offset.set_balance(0.0, 0.0, emit_signal=False)
+        self._on_cdl_changed()
+
     def _reset_power(self):
         for key in ("power_r", "power_g", "power_b"):
-            self.cdl_controls[key][1].setValue(self.cdl_controls[key][2])
-            
+            if key in self.cdl_controls:
+                self.cdl_controls[key][1].setValue(self.cdl_controls[key][2])
+        if hasattr(self, "wheel_power"):
+            self.wheel_power.set_balance(0.0, 0.0, emit_signal=False)
+        self._on_cdl_changed()
+
     def _reset_sat(self):
-        self.cdl_controls["sat"][1].setValue(self.cdl_controls["sat"][2])
+        if "sat" in self.cdl_controls:
+            self.cdl_controls["sat"][1].setValue(self.cdl_controls["sat"][2])
+        self._on_cdl_changed()
 
     def _reset_all_cdl(self):
-        for key in self.cdl_controls:
+        """Reset all color grading parameters to neutral."""
+        for key in getattr(self, 'cdl_controls', {}):
             self.cdl_controls[key][1].setValue(self.cdl_controls[key][2])
+        if hasattr(self, "wheel_slope"):
+            self.wheel_slope.set_balance(0.0, 0.0, emit_signal=False)
+        if hasattr(self, "wheel_offset"):
+            self.wheel_offset.set_balance(0.0, 0.0, emit_signal=False)
+        if hasattr(self, "wheel_power"):
+            self.wheel_power.set_balance(0.0, 0.0, emit_signal=False)
+        self._on_cdl_changed()
 
     def _on_cdl_changed(self):
+        if not hasattr(self, 'cdl_controls') or not self.cdl_controls:
+            return
+
         def get_val(key):
             return float(self.cdl_controls[key][1].value())
-            
+
         slope = (get_val("slope_r"), get_val("slope_g"), get_val("slope_b"))
         offset = (get_val("offset_r"), get_val("offset_g"), get_val("offset_b"))
         power = (get_val("power_r"), get_val("power_g"), get_val("power_b"))
         saturation = get_val("sat")
-        
+
         if hasattr(self, 'viewport') and self.viewport:
             self.viewport.set_cdl_params(slope, offset, power, saturation)
         if hasattr(self, 'viewport_b') and self.viewport_b:
             self.viewport_b.set_cdl_params(slope, offset, power, saturation)
+        for vp in getattr(self, 'viewports', []):
+            if hasattr(vp, 'set_cdl_params'):
+                vp.set_cdl_params(slope, offset, power, saturation)
+        if hasattr(self, 'core') and hasattr(self.core, 'color_pipeline'):
+            self.core.color_pipeline.set_cdl_params(slope, offset, power, saturation)
+
+        if hasattr(self, 'viewport') and self.viewport:
+            self.viewport.canvas.update()
+        for vp in getattr(self, 'viewports', []):
+            if vp.isVisible():
+                vp.canvas.update()
 
     def _import_cdl(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import ASC CDL XML", "", "CDL Files (*.cdl *.xml *.cc)")
@@ -4635,17 +5808,23 @@ class MainWindow(QtWidgets.QMainWindow):
         res = load_cdl_file(path)
         if res:
             slope, offset, power, sat = res
-            
             for key, val in zip(("slope_r", "slope_g", "slope_b"), slope):
-                self.cdl_controls[key][1].setValue(val)
+                if key in self.cdl_controls:
+                    self.cdl_controls[key][1].setValue(val)
             for key, val in zip(("offset_r", "offset_g", "offset_b"), offset):
-                self.cdl_controls[key][1].setValue(val)
+                if key in self.cdl_controls:
+                    self.cdl_controls[key][1].setValue(val)
             for key, val in zip(("power_r", "power_g", "power_b"), power):
-                self.cdl_controls[key][1].setValue(val)
-            self.cdl_controls["sat"][1].setValue(sat)
-            
+                if key in self.cdl_controls:
+                    self.cdl_controls[key][1].setValue(val)
+            if "sat" in self.cdl_controls:
+                self.cdl_controls["sat"][1].setValue(sat)
+
             self._on_cdl_changed()
-            self.status.showMessage(f"CDL Imported: {os.path.basename(path)}", 3000)
+            if hasattr(self, 'status') and self.status:
+                self.status.showMessage(f"CDL Imported: {os.path.basename(path)}", 3000)
+            elif hasattr(self, 'statusBar') and self.statusBar():
+                self.statusBar().showMessage(f"CDL Imported: {os.path.basename(path)}", 3000)
         else:
             QtWidgets.QMessageBox.warning(self, "Import Error", "Failed to parse CDL file. Please check XML format.")
 
@@ -4653,20 +5832,538 @@ class MainWindow(QtWidgets.QMainWindow):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export ASC CDL XML", "grade.cdl", "CDL Files (*.cdl)")
         if not path:
             return
-        
+
         def get_val(key):
             return float(self.cdl_controls[key][1].value())
-            
+
         slope = (get_val("slope_r"), get_val("slope_g"), get_val("slope_b"))
         offset = (get_val("offset_r"), get_val("offset_g"), get_val("offset_b"))
         power = (get_val("power_r"), get_val("power_g"), get_val("power_b"))
-        saturation = get_val("sat")
-        
+        sat = get_val("sat")
+
         from core.color_manager import save_cdl_file
-        if save_cdl_file(path, slope, offset, power, saturation):
-            self.status.showMessage(f"CDL Exported: {os.path.basename(path)}", 3000)
+        if save_cdl_file(path, slope, offset, power, sat):
+            if hasattr(self, 'status') and self.status:
+                self.status.showMessage(f"CDL Exported: {os.path.basename(path)}", 3000)
+            elif hasattr(self, 'statusBar') and self.statusBar():
+                self.statusBar().showMessage(f"CDL Exported: {os.path.basename(path)}", 3000)
         else:
             QtWidgets.QMessageBox.warning(self, "Export Error", "Failed to write CDL file.")
+
+    # ---------- Phase 5: Studio Platform & Playlist Navigation ----------
+    def _toggle_false_color(self, enabled: bool):
+        """Toggle 10-zone false color exposure & clipping heatmap."""
+        if hasattr(self, 'core') and hasattr(self.core, 'color_pipeline'):
+            self.core.color_pipeline.state.false_color = enabled
+        if hasattr(self, 'core_b') and hasattr(self.core_b, 'color_pipeline'):
+            self.core_b.color_pipeline.state.false_color = enabled
+        if hasattr(self, 'viewport') and self.viewport:
+            self.viewport.set_false_color(enabled)
+            self.viewport.update()
+        if hasattr(self, 'viewports'):
+            for vp in self.viewports:
+                vp.set_false_color(enabled)
+                vp.update()
+        if hasattr(self, 'false_color_action') and self.false_color_action.isChecked() != enabled:
+            self.false_color_action.blockSignals(True)
+            self.false_color_action.setChecked(enabled)
+            self.false_color_action.blockSignals(False)
+        if hasattr(self, 'btn_false_color') and self.btn_false_color.isChecked() != enabled:
+            self.btn_false_color.blockSignals(True)
+            self.btn_false_color.setChecked(enabled)
+            self.btn_false_color.blockSignals(False)
+        if self.core.frame_count():
+            self._show_frame(self.current_index)
+
+    def _toggle_playlist_panel(self):
+        """Toggle the collapsible playlist / shot browser drawer."""
+        if self.playlist_widget.isVisible():
+            self.playlist_widget.hide()
+        else:
+            self.playlist_widget.show()
+            self.playlist_widget.refresh()
+
+    def _trigger_playlist_prefetch(self, count: int = 2):
+        """
+        Asynchronously prefetch / download upcoming media items in the playlist
+        so playback transitions seamlessly without any network stalls.
+        """
+        if not hasattr(self, 'playlist_service') or not self.playlist_service.items:
+            return
+
+        cur_idx = self.playlist_service.current_index
+        total = len(self.playlist_service.items)
+
+        items_to_check = []
+        for offset in range(1, count + 1):
+            target_idx = cur_idx + offset
+            if target_idx < total:
+                items_to_check.append(self.playlist_service.items[target_idx])
+            elif self.playlist_service.loop and total > 1:
+                items_to_check.append(self.playlist_service.items[target_idx % total])
+
+        if not items_to_check:
+            return
+
+        class _PrefetchTask(QtCore.QRunnable):
+            def __init__(self, target_item: PlaylistItem):
+                super().__init__()
+                self.target_item = target_item
+
+            def run(self):
+                try:
+                    m_path = self.target_item.media_path
+                    p_id = getattr(self.target_item, 'kitsu_preview_id', None)
+                    if (not m_path or not os.path.exists(m_path)) and (p_id or (m_path and m_path.startswith("http"))):
+                        cached = kitsu_client.download_preview_file(
+                            preview_file_id=p_id,
+                            media_url=m_path if m_path and m_path.startswith("http") else None
+                        )
+                        if cached and os.path.exists(cached):
+                            self.target_item.media_path = cached
+                except Exception as e:
+                    print(f"[Kitsu Prefetch] Error pre-caching upcoming shot: {e}")
+
+        for it in items_to_check:
+            m_path = it.media_path
+            p_id = getattr(it, 'kitsu_preview_id', None)
+            if (not m_path or not os.path.exists(m_path)) and (p_id or (m_path and m_path.startswith("http"))):
+                QtCore.QThreadPool.globalInstance().start(_PrefetchTask(it))
+
+    def _playlist_seamless_next(self):
+        """
+        Seamlessly transition to the next playlist item without interrupting playback.
+        Eliminates the pause/halt between shots in the playlist, cutting directly like an edit timeline.
+        """
+        item = self.playlist_service.next_item()
+        if not item:
+            self.pause()
+            return
+
+        self.playlist_widget.set_current_index(self.playlist_service.current_index)
+        self._current_kitsu_shot = item
+        path = item.media_path
+        preview_id = getattr(item, 'kitsu_preview_id', None)
+
+        # If file is not cached yet, download synchronously as fallback
+        if not path or not os.path.exists(path):
+            if preview_id or (path and (path.startswith("http://") or path.startswith("https://"))):
+                try:
+                    cached_file = kitsu_client.download_preview_file(
+                        preview_file_id=preview_id,
+                        media_url=path if path and path.startswith("http") else None
+                    )
+                    if cached_file and os.path.exists(cached_file):
+                        item.media_path = cached_file
+                        path = cached_file
+                except Exception as e:
+                    print(f"[Kitsu] Failed to download preview media: {e}")
+
+        if not path or not os.path.exists(path):
+            self.pause()
+            self._on_playlist_shot_selected(item)
+            return
+
+        # Perform fast seamless cut
+        self._loading_from_playlist = True
+        try:
+            self.core.load(path)
+        except Exception as e:
+            self.pause()
+            print(f"[Seamless Transition] Failed to load {path}: {e}")
+            return
+        finally:
+            self._loading_from_playlist = False
+
+        cnt = self.core.frame_count()
+        self.current_index = 0
+        self.range_in = 0
+        self.range_out = max(0, cnt - 1)
+
+        self.frame_slider.setMaximum(max(0, cnt - 1))
+        self.frame_slider.setValue(0)
+        self._configure_frame_slider_ticks()
+        if hasattr(self, 'range_start_edit'):
+            self.range_start_edit.setText("0")
+        if hasattr(self, 'range_end_edit'):
+            self.range_end_edit.setText(str(self.range_out))
+
+        # Auto-load Persistent Annotations & Bookmarks
+        try:
+            sidecar = AnnotationService.load_sidecar(path)
+            if sidecar:
+                self.annotations = sidecar.get("annotations", {})
+                self.bookmarks = set(sidecar.get("bookmarks", []))
+            else:
+                self.annotations = {}
+                self.bookmarks = set()
+        except Exception:
+            self.annotations = {}
+            self.bookmarks = set()
+
+        self._refresh_annotation_display()
+        self._update_timeline_markers()
+
+        # Audio attach and position reset
+        self._audio_attach(path)
+        if self._audio_player and self._audio_player.source().isValid():
+            self._audio_player.setPosition(0)
+            if self.playing:
+                self._audio_player.play()
+
+        # Reset playback clock for the new clip
+        if self._elapsed_timer is not None:
+            self._elapsed_timer.restart()
+        self._play_start_index = 0
+
+        # Show frame 0 immediately
+        self._show_frame(0)
+
+        # Trigger prefetch of upcoming clips
+        self._trigger_playlist_prefetch(count=2)
+
+    def playlist_next_shot(self, autoplay: bool = False):
+        """Advance to the next shot in the playlist."""
+        item = self.playlist_service.next_item()
+        if item:
+            self.playlist_widget.set_current_index(self.playlist_service.current_index)
+            self._on_playlist_shot_selected(item)
+            self._trigger_playlist_prefetch(count=2)
+            if autoplay:
+                self.play()
+
+    def playlist_prev_shot(self, autoplay: bool = False):
+        """Go back to the previous shot in the playlist."""
+        item = self.playlist_service.prev_item()
+        if item:
+            self.playlist_widget.set_current_index(self.playlist_service.current_index)
+            self._on_playlist_shot_selected(item)
+            self._trigger_playlist_prefetch(count=2)
+            if autoplay:
+                self.play()
+
+    def _on_playlist_shot_selected(self, item: PlaylistItem):
+        """Load media for the selected playlist item and update Kitsu review context."""
+        if not item:
+            return
+        self._current_kitsu_shot = item
+        path = item.media_path
+        preview_id = getattr(item, 'kitsu_preview_id', None)
+
+        # If media is not already on disk, download/cache it from Kitsu
+        if not path or not os.path.exists(path):
+            if preview_id or (path and (path.startswith("http://") or path.startswith("https://"))):
+                QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+                self.statusBar().showMessage(f"Downloading preview for {item.name or item.shot} from Kitsu...", 5000)
+                try:
+                    cached_file = kitsu_client.download_preview_file(
+                        preview_file_id=preview_id,
+                        media_url=path if path and path.startswith("http") else None
+                    )
+                    if cached_file and os.path.exists(cached_file):
+                        item.media_path = cached_file
+                        path = cached_file
+                except Exception as e:
+                    print(f"[Kitsu] Failed to download preview media: {e}")
+                finally:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+
+        if path and os.path.exists(path):
+            self._loading_from_playlist = True
+            try:
+                self.load_media(path)
+            finally:
+                self._loading_from_playlist = False
+        else:
+            QtWidgets.QMessageBox.warning(
+                self, "Media File Missing",
+                f"Media could not be loaded or downloaded from Kitsu:\n{path or item.name}\n\nPlease verify network connection or storage mount."
+            )
+
+    def _on_playlist_add_files(self):
+        """Allow user to select multiple files or sequences to add to the playlist."""
+        media_filter = (
+            "All Supported Media (*.exr *.sxr *.tif *.tiff *.dpx *.cin *.png *.jpg *.jpeg *.mov *.mp4 *.avi *.mkv *.mxf *.webm);;"
+            "Video Files (*.mov *.mp4 *.avi *.mkv *.mxf *.webm *.m4v *.flv *.ts);;"
+            "Image Sequences (*.exr *.sxr *.tif *.tiff *.dpx *.cin *.png *.jpg *.jpeg *.tga *.bmp *.webp);;"
+            "All Files (*.*)"
+        )
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Add Media Files to Playlist (Select Multiple)", "", media_filter)
+        if paths:
+            self.add_media_paths_to_playlist(paths)
+
+    def _on_playlist_add_folder(self):
+        """Allow user to select a folder containing video files or image sequences."""
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Add Media Folder to Playlist")
+        if folder:
+            self.add_media_paths_to_playlist([folder])
+
+    def add_media_paths_to_playlist(self, paths: List[str]):
+        """
+        Process multiple file and/or directory paths, group image sequences so only one entry is created
+        per sequence, create PlaylistItem instances, and add them to the playlist.
+        """
+        if not paths:
+            return
+
+        import re
+        from core.player_core import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, detect_image_sequence
+
+        added_items: List[PlaylistItem] = []
+        processed_seq_bases = set()
+
+        # Collect all concrete files if directories are passed
+        flat_files: List[str] = []
+        for p in paths:
+            if os.path.isdir(p):
+                for root, _, files in os.walk(p):
+                    for f in sorted(files):
+                        flat_files.append(os.path.join(root, f))
+            elif os.path.isfile(p):
+                flat_files.append(p)
+
+        for file_path in flat_files:
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in VIDEO_EXTENSIONS:
+                ctx = kitsu_client.parse_shot_context(file_path)
+                shot_name = ctx.get("shot") or os.path.splitext(os.path.basename(file_path))[0]
+                item = PlaylistItem(
+                    media_path=file_path,
+                    name=os.path.basename(file_path),
+                    sequence=ctx.get("sequence", ""),
+                    shot=shot_name,
+                    task=ctx.get("task", ""),
+                    version=ctx.get("version", "")
+                )
+                added_items.append(item)
+            elif ext in IMAGE_EXTENSIONS:
+                seq = detect_image_sequence(file_path)
+                if seq:
+                    first_f = seq[0]
+                    folder = os.path.dirname(first_f)
+                    base = os.path.splitext(os.path.basename(first_f))[0]
+                    base_key = os.path.join(folder, re.sub(r'\d+$', '', base))
+                    if base_key in processed_seq_bases:
+                        continue
+                    processed_seq_bases.add(base_key)
+
+                    ctx = kitsu_client.parse_shot_context(first_f)
+                    shot_name = ctx.get("shot") or re.sub(r'[._-]\d+$', '', os.path.splitext(os.path.basename(first_f))[0])
+                    item = PlaylistItem(
+                        media_path=first_f,
+                        name=shot_name,
+                        sequence=ctx.get("sequence", ""),
+                        shot=shot_name,
+                        task=ctx.get("task", ""),
+                        version=ctx.get("version", ""),
+                        frame_count=len(seq)
+                    )
+                    added_items.append(item)
+                else:
+                    ctx = kitsu_client.parse_shot_context(file_path)
+                    shot_name = ctx.get("shot") or os.path.splitext(os.path.basename(file_path))[0]
+                    item = PlaylistItem(
+                        media_path=file_path,
+                        name=os.path.basename(file_path),
+                        sequence=ctx.get("sequence", ""),
+                        shot=shot_name,
+                        task=ctx.get("task", ""),
+                        version=ctx.get("version", ""),
+                        frame_count=1
+                    )
+                    added_items.append(item)
+
+        if not added_items:
+            QtWidgets.QMessageBox.information(self, "No Media Found", "No supported video or image sequence files found in the selection.")
+            return
+
+        was_empty = self.playlist_service.is_empty()
+        for it in added_items:
+            self.playlist_service.add_item(it)
+
+        self.playlist_widget.refresh()
+        self.playlist_widget.show()
+
+        if was_empty and self.playlist_service.items:
+            first = self.playlist_service.set_current_index(0)
+            self.playlist_widget.set_current_index(0)
+            if first:
+                self._on_playlist_shot_selected(first)
+
+        self.status.showMessage(f"Added {len(added_items)} shot(s) to playlist", 3000)
+
+    def _open_current_shot_in_kitsu(self, item=None):
+        """Open the active shot / task URL in default web browser (Ctrl+K)."""
+        target = item or getattr(self, '_current_kitsu_shot', None)
+        url = None
+        if target:
+            if target.kitsu_url:
+                url = target.kitsu_url
+            elif getattr(target, 'kitsu_shot_id', None):
+                url = kitsu_client.build_shot_url(target.kitsu_shot_id, getattr(target, 'kitsu_project_id', None))
+            elif getattr(target, 'kitsu_task_id', None):
+                url = kitsu_client.build_task_url(target.kitsu_task_id, getattr(target, 'kitsu_project_id', None))
+
+        if not url and self.core.media and self.core.media.path:
+            ctx = kitsu_client.parse_shot_context(self.core.media.path)
+            if ctx.get('shot') and kitsu_client.is_authenticated():
+                try:
+                    shot_obj = kitsu_client.get_shot_by_name(ctx['shot'])
+                    if shot_obj and shot_obj.get('id'):
+                        url = kitsu_client.build_shot_url(shot_obj['id'], shot_obj.get('project_id'))
+                except Exception:
+                    pass
+
+        if not url and kitsu_client.host_url:
+            url = f"{kitsu_client.host_url.rstrip('/')}/productions"
+
+        if url:
+            webbrowser.open(url)
+            self.statusBar().showMessage(f"Opening in Kitsu: {url}", 4000)
+        else:
+            self._on_configure_kitsu()
+
+    def _on_kitsu_shot_opened(self, item):
+        if item:
+            s_name = getattr(item, 'shot_name', None) or getattr(item, 'name', 'Shot')
+            self.statusBar().showMessage(f"Opened {s_name} in Kitsu browser", 3000)
+
+    def _on_load_kitsu_playlist(self):
+        """Open Kitsu Connect dialog and load selected review playlist into the player."""
+        dlg = KitsuConnectDialog(parent=self, prefs=self.prefs)
+        if dlg.exec():
+            items = dlg.get_selected_playlist_items()
+            if items:
+                self.playlist_service.clear()
+                for item in items:
+                    self.playlist_service.add_item(item)
+                self.playlist_widget.refresh()
+                self.playlist_widget.show()
+                # Load first shot
+                first = self.playlist_service.set_current_index(0)
+                self.playlist_widget.set_current_index(0)
+                if first:
+                    self._on_playlist_shot_selected(first)
+                self._trigger_playlist_prefetch(count=2)
+
+    def _on_publish_kitsu_review(self, target_item=None):
+        """Capture current annotated frame and launch Kitsu supervisor review publish dialog."""
+        if not self.core.frame_count():
+            QtWidgets.QMessageBox.warning(self, "No Media", "Please load a shot before publishing a review.")
+            return
+
+        if not kitsu_client.is_authenticated():
+            conn_dlg = KitsuConnectDialog(parent=self, prefs=self.prefs)
+            if not conn_dlg.exec():
+                return
+
+        item = target_item or getattr(self, '_current_kitsu_shot', None)
+        shot_name = "Shot"
+        shot_id = None
+        task_id = None
+        seq_name = ""
+        task_name = ""
+
+        if item:
+            shot_name = item.shot_name or item.name
+            shot_id = getattr(item, 'kitsu_shot_id', None)
+            task_id = getattr(item, 'kitsu_task_id', None)
+            seq_name = getattr(item, 'sequence_name', '')
+            task_name = getattr(item, 'task_name', '')
+
+        if not shot_id and self.core.media and self.core.media.path:
+            ctx = kitsu_client.parse_shot_context(self.core.media.path)
+            if ctx.get('shot'):
+                shot_name = ctx['shot']
+                seq_name = ctx.get('sequence', '')
+                task_name = ctx.get('task', '')
+                if kitsu_client.is_authenticated():
+                    try:
+                        s_data = kitsu_client.get_shot_by_name(shot_name)
+                        if s_data:
+                            shot_id = s_data.get('id')
+                    except Exception:
+                        pass
+
+        preview_path = None
+        try:
+            arr = self.viewport.get_frame_with_annotations()
+            if arr is not None:
+                h, w = arr.shape[:2]
+                c = arr.shape[2] if len(arr.shape) > 2 else 3
+                fmt = QtGui.QImage.Format.Format_RGB888 if c == 3 else QtGui.QImage.Format.Format_RGBA8888
+                img = QtGui.QImage(arr.tobytes(), w, h, w * c, fmt)
+                temp_dir = tempfile.gettempdir()
+                clean_name = "".join([c for c in shot_name if c.isalnum() or c in ('-', '_')])
+                preview_path = os.path.join(temp_dir, f"kitsu_annot_{clean_name}_{self.current_index + 1:04d}.png")
+                img.save(preview_path, "PNG")
+        except Exception as e:
+            print(f"[Kitsu] Warning: Failed to render snapshot preview: {e}")
+
+        shot_ctx = {
+            "shot": shot_name,
+            "sequence": seq_name,
+            "task": task_name,
+        }
+
+        dlg = KitsuPublishDialog(
+            task_id=task_id,
+            shot_id=shot_id,
+            shot_name=shot_name,
+            preview_image_path=preview_path,
+            shot_context=shot_ctx,
+            parent=self,
+            prefs=self.prefs
+        )
+        if dlg.exec():
+            QtWidgets.QMessageBox.information(
+                self, "Review Note Published",
+                f"Review feedback and annotations successfully published to Kitsu for {shot_name}!"
+            )
+
+    def _on_configure_kitsu(self):
+        """Open Kitsu connection and credentials dialog."""
+        dlg = KitsuConnectDialog(parent=self, prefs=self.prefs)
+        dlg.exec()
+
+    def _on_toggle_clear_kitsu_cache_exit(self, checked: bool):
+        self.prefs["clear_kitsu_cache_on_exit"] = checked
+        self._save_prefs()
+        self.statusBar().showMessage(
+            f"Kitsu cache auto-clear on exit {'enabled' if checked else 'disabled'}.", 3000
+        )
+
+    def _on_clear_kitsu_cache_now(self):
+        """Manually wipe all cached Kitsu preview media and thumbnails."""
+        files_rem, bytes_freed = kitsu_client.clear_cache()
+        if bytes_freed >= 1024 * 1024:
+            freed_str = f"{bytes_freed / (1024 * 1024):.1f} MB"
+        else:
+            freed_str = f"{bytes_freed / 1024:.0f} KB"
+        QtWidgets.QMessageBox.information(
+            self, "Kitsu Cache Cleared",
+            f"Local Kitsu media cache has been cleared.\nRemoved {files_rem} files ({freed_str} freed)."
+        )
+        self.statusBar().showMessage(f"Kitsu cache cleared: {files_rem} files ({freed_str}) removed.", 4000)
+
+    def closeEvent(self, event: QtGui.QCloseEvent):
+        """Handle application exit and clean up resources/cache if configured."""
+        try:
+            if self.prefs.get("clear_kitsu_cache_on_exit", False):
+                files_rem, bytes_freed = kitsu_client.clear_cache()
+                print(f"[Kitsu] Exit cleanup: deleted {files_rem} cached files ({bytes_freed} bytes freed).")
+        except Exception as e:
+            print(f"[Kitsu] Warning: Error during exit cache cleanup: {e}")
+
+        # Stop playback and timers
+        try:
+            self.pause()
+            if hasattr(self, 'timer') and self.timer.isActive():
+                self.timer.stop()
+        except Exception:
+            pass
+
+        super().closeEvent(event)
 
     # ---------- Run ----------
     def run(self):

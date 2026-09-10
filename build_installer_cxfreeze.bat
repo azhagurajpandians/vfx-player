@@ -18,14 +18,21 @@ if not exist "%BUILD_DIR%" (
 )
 
 rem 2. Locate Inno Setup Compiler (ISCC.exe)
-set "ISCC_PATH=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-if not exist "%ISCC_PATH%" (
-    set "ISCC_PATH=C:\Program Files\Inno Setup 6\ISCC.exe"
+set "ISCC_PATH="
+where iscc.exe >nul 2>nul
+if %errorlevel% equ 0 (
+    for /f "delims=" %%i in ('where iscc.exe') do (
+        if not defined ISCC_PATH set "ISCC_PATH=%%i"
+    )
 )
-if not exist "%ISCC_PATH%" (
-    set "ISCC_PATH=C:\Users\%USERNAME%\AppData\Local\Programs\Inno Setup 6\ISCC.exe"
-)
-if not exist "%ISCC_PATH%" (
+if not defined ISCC_PATH if exist "%LOCALAPPDATA%\Programs\Inno Setup 7\ISCC.exe" set "ISCC_PATH=%LOCALAPPDATA%\Programs\Inno Setup 7\ISCC.exe"
+if not defined ISCC_PATH if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set "ISCC_PATH=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+if not defined ISCC_PATH if exist "C:\Program Files\Inno Setup 7\ISCC.exe" set "ISCC_PATH=C:\Program Files\Inno Setup 7\ISCC.exe"
+if not defined ISCC_PATH if exist "C:\Program Files (x86)\Inno Setup 7\ISCC.exe" set "ISCC_PATH=C:\Program Files (x86)\Inno Setup 7\ISCC.exe"
+if not defined ISCC_PATH if exist "C:\Program Files\Inno Setup 6\ISCC.exe" set "ISCC_PATH=C:\Program Files\Inno Setup 6\ISCC.exe"
+if not defined ISCC_PATH if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" set "ISCC_PATH=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+
+if not defined ISCC_PATH (
     echo [ERROR] Inno Setup Compiler not found.
     pause
     exit /b 1
@@ -39,7 +46,8 @@ if not exist "dist_installer" (
 rem 4. Run Inno Setup Compiler
 echo.
 echo [INFO] Compiling installer with Inno Setup...
-"%ISCC_PATH%" "%~dp0installer_cxfreeze.iss"
+echo [INFO] Compiler: "%ISCC_PATH%"
+"%ISCC_PATH%" /DAppSourceDir="%BUILD_DIR%" "%~dp0installer_cxfreeze.iss"
 
 if %errorlevel% neq 0 (
     echo [ERROR] Inno Setup compilation failed!

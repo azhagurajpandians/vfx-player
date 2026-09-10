@@ -56,7 +56,54 @@ vec4 apply_grading(vec4 color) {
         top_color.rgb = vec3(top_color.b);
     } else if ($channel_mode == 4) {
         top_color.rgb = vec3(top_color.a);
+    } else if ($channel_mode == 5) {
+        top_color.rgb = vec3(luma);
     }
+
+    // 7. Alpha / Transparency Mode
+    if ($alpha_mode == 1) { // Grayscale Alpha
+        top_color.rgb = vec3(top_color.a);
+    } else if ($alpha_mode == 2) { // VFX Checkerboard
+        vec2 check_coord = floor(gl_FragCoord.xy / 16.0);
+        float check_pattern = mod(check_coord.x + check_coord.y, 2.0);
+        vec3 bg = mix(vec3(0.18), vec3(0.28), check_pattern);
+        top_color.rgb = mix(bg, top_color.rgb, top_color.a);
+    } else if ($alpha_mode == 3) { // Black background
+        top_color.rgb = top_color.rgb * top_color.a;
+    } else if ($alpha_mode == 4) { // White background
+        top_color.rgb = mix(vec3(1.0), top_color.rgb, top_color.a);
+    }
+
+    // 8. False Color Exposure Heatmap (10 Zones)
+    if ($false_color_enabled == 1) {
+        float fc_luma = dot(top_color.rgb, vec3(0.2126, 0.7152, 0.0722));
+        vec3 fc;
+        if (fc_luma < 0.02) {
+            fc = vec3(0.5, 0.0, 0.5);   // Purple: Crushed blacks (<2%)
+        } else if (fc_luma < 0.10) {
+            fc = vec3(0.0, 0.3, 1.0);   // Blue: Shadows (2%-10%)
+        } else if (fc_luma < 0.25) {
+            fc = vec3(0.0, 0.8, 0.8);   // Cyan: Low mids (10%-25%)
+        } else if (fc_luma < 0.38) {
+            fc = vec3(0.3, 0.3, 0.3);   // Dark Gray: Sub-mid (25%-38%)
+        } else if (fc_luma < 0.45) {
+            fc = vec3(0.1, 0.85, 0.2);  // Green: 18% Middle Gray (38%-45%)
+        } else if (fc_luma < 0.52) {
+            fc = vec3(0.5, 0.5, 0.5);   // Mid Gray (45%-52%)
+        } else if (fc_luma < 0.58) {
+            fc = vec3(1.0, 0.55, 0.65); // Pink: Skin tones (52%-58%)
+        } else if (fc_luma < 0.75) {
+            fc = vec3(0.65, 0.65, 0.65);// High Mids (58%-75%)
+        } else if (fc_luma < 0.85) {
+            fc = vec3(1.0, 0.9, 0.0);   // Yellow: High highlights (75%-85%)
+        } else if (fc_luma < 0.98) {
+            fc = vec3(1.0, 0.5, 0.0);   // Orange: Near clipping (85%-98%)
+        } else {
+            fc = vec3(1.0, 0.0, 0.0);   // Red: Clipped highlights (>=98%)
+        }
+        top_color.rgb = fc;
+    }
+
     top_color.rgb = clamp(top_color.rgb, 0.0, 1.0);
     return top_color;
 }
@@ -68,6 +115,8 @@ class GradedWipeImageVisual(ImageVisual):
         self._grading_fn['exposure'] = 0.0
         self._grading_fn['gamma'] = 1.0
         self._grading_fn['channel_mode'] = 0
+        self._grading_fn['alpha_mode'] = 0
+        self._grading_fn['false_color_enabled'] = 0
         self._grading_fn['wipe_ratio'] = 0.5
         self._grading_fn['wipe_enabled'] = 0
         self._grading_fn['slope'] = np.array([1.0, 1.0, 1.0], dtype=np.float32)
@@ -75,6 +124,7 @@ class GradedWipeImageVisual(ImageVisual):
         self._grading_fn['power'] = np.array([1.0, 1.0, 1.0], dtype=np.float32)
         self._grading_fn['saturation'] = 1.0
         self._texture_b = GPUScaledTexture2D(data=np.zeros((1, 1, 3), dtype=np.uint8), internalformat='auto')
+        self._texture_b.set_clim('auto')
         self._grading_fn['texture_b'] = self._texture_b
         super().__init__(*args, **kwargs)
 
@@ -84,9 +134,18 @@ class GradedWipeImageVisual(ImageVisual):
         return FunctionChain(None, [null_fn, self._grading_fn])
 
     def set_data_b(self, data):
+        if data is None:
+            return
         if not data.flags['C_CONTIGUOUS']:
             data = np.ascontiguousarray(data)
-        self._texture_b.set_data(data)
+        if getattr(self._texture_b, '_clim', None) is None:
+            self._texture_b.set_clim('auto')
+        try:
+            self._texture_b.set_data(data)
+        except Exception:
+            self._texture_b = GPUScaledTexture2D(data=data, internalformat='auto')
+            self._texture_b.set_clim('auto')
+            self._grading_fn['texture_b'] = self._texture_b
 
 GradedWipeImage = create_visual_node(GradedWipeImageVisual)
 
@@ -220,6 +279,56 @@ class PBOTextureUploader:
             self.pbos = []
 
 
+class FalseColorLegend(QtWidgets.QFrame):
+    """Floating transparent overlay displaying the 10-zone False Color exposure key."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setStyleSheet("""
+            QFrame {
+                background-color: rgba(18, 18, 22, 215);
+                border: 1px solid #323238;
+                border-radius: 6px;
+                padding: 4px 6px;
+            }
+            QLabel {
+                color: #e0e0e0;
+                font-size: 10px;
+                font-family: 'Segoe UI', sans-serif;
+            }
+        """)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(3)
+
+        title = QtWidgets.QLabel("<b>FALSE COLOR (IRE)</b>")
+        title.setStyleSheet("color: #0a84ff; font-size: 10px; font-weight: bold;")
+        layout.addWidget(title)
+
+        zones = [
+            ("#ff0000", "Clipping (>98%)"),
+            ("#ff8000", "Near Clip (85-98%)"),
+            ("#ffe600", "Highs (75-85%)"),
+            ("#ff8ca6", "Skin (52-58%)"),
+            ("#1ad933", "18% Gray (38-45%)"),
+            ("#00cccc", "Low Mids (10-25%)"),
+            ("#004dff", "Shadows (2-10%)"),
+            ("#800080", "Black Crush (<2%)"),
+        ]
+
+        for color_hex, label_text in zones:
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(6)
+            swatch = QtWidgets.QFrame()
+            swatch.setFixedSize(12, 10)
+            swatch.setStyleSheet(f"background-color: {color_hex}; border: 1px solid rgba(255,255,255,0.25); border-radius: 2px;")
+            lbl = QtWidgets.QLabel(label_text)
+            row.addWidget(swatch)
+            row.addWidget(lbl)
+            row.addStretch()
+            layout.addLayout(row)
+
+
 # ─────────────────────────────────────────────────────────────────
 # VispyViewport
 # ─────────────────────────────────────────────────────────────────
@@ -239,10 +348,11 @@ class VispyViewport(QtWidgets.QWidget):
     pixel_probe_hover = QtCore.pyqtSignal(float, float)   # image x, y
     stroke_finished = QtCore.pyqtSignal(dict)             # full stroke dict
 
-    def __init__(self, main_window=None, role='primary'):
+    def __init__(self, main_window=None, role='primary', slot_index: int = 0):
         super().__init__()
         self.main_window = main_window
         self.role = role
+        self.slot_index = slot_index
         self.setAcceptDrops(True)
         self.setMouseTracking(True)
         
@@ -297,11 +407,25 @@ class VispyViewport(QtWidgets.QWidget):
         self._show_guide_title = True
         self._guide_visuals = []
         
+        self._false_color_enabled = False
+        self._false_color_legend = FalseColorLegend(self)
+        self._false_color_legend.hide()
+        
         # Wire up click detection and canvas mouse events
         self._init_click_detection()
         
         # Intercept VisPy default key handling for Esc
         self.canvas.events.key_press.connect(self._on_canvas_key_press)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reposition_false_color_legend()
+
+    def _reposition_false_color_legend(self):
+        if hasattr(self, '_false_color_legend') and self._false_color_legend.isVisible():
+            self._false_color_legend.adjustSize()
+            self._false_color_legend.move(max(10, self.width() - self._false_color_legend.width() - 15), 15)
+            self._false_color_legend.raise_()
 
     # ─────────────────────────────────────────────────────────────
     # Key handling
@@ -314,15 +438,48 @@ class VispyViewport(QtWidgets.QWidget):
             return
 
         if event.key == 'Escape':
+            if self._text_input is not None:
+                self._cancel_text_input()
+            elif self.main_window:
+                if getattr(self.main_window, 'fullscreen', False):
+                    QtCore.QTimer.singleShot(0, lambda: self.main_window._toggle_fullscreen(False))
+                elif getattr(self, 'is_drawing', False):
+                    QtCore.QTimer.singleShot(0, self.main_window._toggle_annotate_mode)
+            event.handled = True
+        elif event.key in ('/', '\\', 'Slash', 'slash'):
+            self.fit_to_window()
             if self.main_window:
-                QtCore.QTimer.singleShot(0, self.main_window.close)
+                if hasattr(self.main_window, 'viewport_b') and self.main_window.viewport_b:
+                    self.main_window.viewport_b.fit_to_window()
+                if hasattr(self.main_window, '_update_zoom_label'):
+                    self.main_window._update_zoom_label()
             event.handled = True
 
     def keyPressEvent(self, event: QtGui.QKeyEvent):
-        """Handle Qt-level key events; ensure Esc is consumed."""
+        """Handle Qt-level key events; ensure Esc exits fullscreen or cancels annotation."""
         if event.key() == QtCore.Qt.Key.Key_Escape:
+            if self._text_input is not None:
+                self._cancel_text_input()
+                event.accept()
+                return
             if self.main_window:
-                QtCore.QTimer.singleShot(0, self.main_window.close)
+                if getattr(self.main_window, 'fullscreen', False):
+                    QtCore.QTimer.singleShot(0, lambda: self.main_window._toggle_fullscreen(False))
+                    event.accept()
+                    return
+                elif getattr(self, 'is_drawing', False):
+                    QtCore.QTimer.singleShot(0, self.main_window._toggle_annotate_mode)
+                    event.accept()
+                    return
+            event.accept()
+            return
+        elif event.key() in (QtCore.Qt.Key.Key_Slash, QtCore.Qt.Key.Key_Backslash):
+            self.fit_to_window()
+            if self.main_window:
+                if hasattr(self.main_window, 'viewport_b') and self.main_window.viewport_b:
+                    self.main_window.viewport_b.fit_to_window()
+                if hasattr(self.main_window, '_update_zoom_label'):
+                    self.main_window._update_zoom_label()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -344,8 +501,22 @@ class VispyViewport(QtWidgets.QWidget):
         self.canvas.update()
 
     def set_channel_mode(self, mode: str):
-        mapping = {'RGB': 0, 'R': 1, 'G': 2, 'B': 3, 'A': 4}
+        mapping = {'RGB': 0, 'R': 1, 'G': 2, 'B': 3, 'A': 4, 'Luma': 5}
         self.image_visual._grading_fn['channel_mode'] = mapping.get(mode, 0)
+        self.canvas.update()
+
+    def set_alpha_mode(self, mode: str):
+        mapping = {'RGB': 0, 'Alpha': 1, 'Checkerboard': 2, 'Black': 3, 'White': 4}
+        self.image_visual._grading_fn['alpha_mode'] = mapping.get(mode, 0)
+        self.canvas.update()
+
+    def set_false_color(self, enabled: bool):
+        self._false_color_enabled = bool(enabled)
+        self.image_visual._grading_fn['false_color_enabled'] = 1 if enabled else 0
+        if hasattr(self, '_false_color_legend'):
+            self._false_color_legend.setVisible(self._false_color_enabled)
+            if self._false_color_enabled:
+                self._reposition_false_color_legend()
         self.canvas.update()
 
     def set_cdl_params(self, slope: tuple, offset: tuple, power: tuple, saturation: float):
@@ -458,10 +629,19 @@ class VispyViewport(QtWidgets.QWidget):
         self._click_timer.timeout.connect(self._emit_single_click)
         self._pending_double = False
         
+        self._press_pos = None
+        self._pan_last_pos = None
+        self._is_panning = False
+        
         self.canvas.events.mouse_press.connect(self._on_canvas_mouse_press)
         self.canvas.events.mouse_release.connect(self._on_canvas_mouse_release)
         self.canvas.events.mouse_double_click.connect(self._on_canvas_double_click)
         self.canvas.events.mouse_move.connect(self._on_mouse_move)
+        self.canvas.events.mouse_wheel.connect(self._on_mouse_wheel)
+
+    def _on_mouse_wheel(self, event):
+        if self.main_window and hasattr(self.main_window, '_update_zoom_label'):
+            QtCore.QTimer.singleShot(20, self.main_window._update_zoom_label)
 
     # ─────────────────────────────────────────────────────────────
     # Coordinate mapping
@@ -523,6 +703,21 @@ class VispyViewport(QtWidgets.QWidget):
             event.handled = True
             return
 
+        # Middle-click (button 3): start panning (always available, even while drawing)
+        if event.button == 3:
+            self._is_panning = True
+            self._pan_last_pos = event.pos
+            event.handled = True
+            return
+
+        # Alt+Click or Space+Click: pan modifier
+        modifiers = getattr(event, 'modifiers', ()) or ()
+        if event.button == 1 and ('Alt' in modifiers or 'Space' in modifiers):
+            self._is_panning = True
+            self._pan_last_pos = event.pos
+            event.handled = True
+            return
+
         if event.button == 1:
             # If text input widget is active, commit it before starting a new action
             if self._text_input is not None:
@@ -551,15 +746,50 @@ class VispyViewport(QtWidgets.QWidget):
                 except Exception:
                     import traceback; traceback.print_exc()
             else:
+                self._press_pos = event.pos
+                self._pan_last_pos = event.pos
+                self._is_panning = False
                 if not self._click_timer.isActive():
                     self._click_timer.start()
 
     def _on_mouse_move(self, event):
         try:
-            # Always attempt coordinate mapping, even outside image bounds.
-            # Drawing must work across the FULL canvas area.
-            scene_x, scene_y = self._map_to_scene(event.pos)
+            # 1. Direct active panning (middle click, alt+drag, or drag past threshold)
+            if getattr(self, '_is_panning', False) and getattr(self, '_pan_last_pos', None) is not None:
+                s1_x, s1_y = self._map_to_scene(self._pan_last_pos)
+                s2_x, s2_y = self._map_to_scene(event.pos)
+                dx = s1_x - s2_x
+                dy = s1_y - s2_y
+                self.view.camera.pan((dx, dy))
+                self._pan_last_pos = event.pos
+                self.canvas.update()
+                event.handled = True
+                return
 
+            # 2. Left-drag when NOT drawing -> check if dragged past threshold to begin pan
+            is_button_1_down = (
+                event.button == 1
+                or (hasattr(event, 'buttons') and 1 in event.buttons)
+            )
+            if not self.is_drawing and is_button_1_down:
+                if getattr(self, '_press_pos', None) is not None:
+                    p0 = self._press_pos
+                    dist = math.hypot(event.pos[0] - p0[0], event.pos[1] - p0[1])
+                    if dist >= 4.0:
+                        self._click_timer.stop()
+                        self._is_panning = True
+                        s1_x, s1_y = self._map_to_scene(p0)
+                        s2_x, s2_y = self._map_to_scene(event.pos)
+                        dx = s1_x - s2_x
+                        dy = s1_y - s2_y
+                        self.view.camera.pan((dx, dy))
+                        self._pan_last_pos = event.pos
+                        self.canvas.update()
+                        event.handled = True
+                        return
+
+            # 3. Drawing mode drag preview
+            scene_x, scene_y = self._map_to_scene(event.pos)
             is_dragging = (
                 (event.button == 1)
                 or (hasattr(event, 'buttons') and 1 in event.buttons)
@@ -572,7 +802,7 @@ class VispyViewport(QtWidgets.QWidget):
                 event.handled = True
                 return
 
-            # Hover pixel probe — only when image is loaded
+            # 4. Hover pixel probe — only when image is loaded
             if self.image_visual.visible and self._last_shape is not None:
                 x, y, _vy = self._map_to_image(event.pos)
                 self.pixel_probe_hover.emit(x, y)
@@ -580,6 +810,17 @@ class VispyViewport(QtWidgets.QWidget):
             import traceback; traceback.print_exc()
 
     def _on_canvas_mouse_release(self, event):
+        if getattr(self, '_is_panning', False):
+            self._is_panning = False
+            self._pan_last_pos = None
+            self._press_pos = None
+            self._click_timer.stop()
+            event.handled = True
+            return
+
+        self._press_pos = None
+        self._pan_last_pos = None
+
         if event.button == 1 and self.is_drawing:
             if self.draw_tool in ('eraser', 'text'):
                 event.handled = True
@@ -612,7 +853,8 @@ class VispyViewport(QtWidgets.QWidget):
             self.double_clicked.emit()
 
     def _emit_single_click(self):
-        self.single_clicked.emit()
+        if not getattr(self, '_is_panning', False):
+            self.single_clicked.emit()
 
     # ─────────────────────────────────────────────────────────────
     # Live preview during drag
@@ -1065,18 +1307,37 @@ class VispyViewport(QtWidgets.QWidget):
     # Camera helpers
     # ─────────────────────────────────────────────────────────────
 
+    @property
+    def current_zoom(self) -> float:
+        """Calculate current effective zoom factor relative to native image size."""
+        if getattr(self, '_last_shape', None) and hasattr(self.view, 'camera') and self.view.camera and hasattr(self.view.camera, 'rect'):
+            h, w = self._last_shape
+            rect = self.view.camera.rect
+            if rect.width > 0:
+                return float(w / rect.width)
+        return float(getattr(self, '_zoom', 1.0))
+
     def fit_to_window(self):
+        """Fit image to window, reset pan offset, and center image."""
         if self._last_shape:
             h, w = self._last_shape
             self.view.camera.set_range(x=(0, w), y=(0, h), margin=0.01)
         else:
             self.view.camera.set_range(margin=0.01)
         self._zoom = 1.0
+        self.canvas.update()
 
     def set_zoom(self, value: float):
-        factor = value / self._zoom
+        """Zoom to specified magnification factor while keeping center."""
+        curr = self.current_zoom
+        if curr > 0.001:
+            factor = value / curr
+        else:
+            factor = value / max(self._zoom, 0.001)
         self._zoom = value
-        self.view.camera.zoom(factor)
+        if abs(factor) > 0.0001:
+            self.view.camera.zoom(1.0 / factor)
+        self.canvas.update()
 
     # ─────────────────────────────────────────────────────────────
     # Drag-and-drop
@@ -1090,7 +1351,9 @@ class VispyViewport(QtWidgets.QWidget):
         paths = [u.toLocalFile() for u in event.mimeData().urls()]
         if paths and self.main_window:
             target = paths[0]
-            if self.role == 'secondary':
+            if hasattr(self.main_window, 'load_media_into_slot'):
+                self.main_window.load_media_into_slot(self.slot_index, target)
+            elif self.role == 'secondary':
                 self.main_window.load_compare_media(target)
             else:
                 self.main_window.load_media(target)

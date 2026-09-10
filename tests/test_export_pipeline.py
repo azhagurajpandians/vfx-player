@@ -155,6 +155,44 @@ class TestExportPipeline(unittest.TestCase):
         
         core.loader.stop()
 
+    def test_burnin_presets_and_timecode(self):
+        """Test burn-in drawing for all presets and timecode without crashing."""
+        core = PlayerCore()
+        for preset_name in ['client_review', 'internal_vfx', 'dailies', 'vfx_ref']:
+            worker = ExportWorker(
+                core=core, output_path="dummy.mp4", start_frame=1001, end_frame=1100,
+                format_preset="mp4", width=1920, height=1080, aspect_mode="fill", fps=24.0,
+                apply_ocio=False, apply_grade=False,
+                burnin_options={
+                    'enabled': True,
+                    'preset': preset_name,
+                    'shot': 'SHOT_010',
+                    'version': 'v002',
+                    'task': 'Comp',
+                    'artist': 'Jane',
+                    'colorspace': 'ACEScg',
+                    'show_timecode': True,
+                    'start_frame_val': 1001,
+                    'studio': 'Knack Studios'
+                },
+                include_audio=False
+            )
+            img = np.zeros((1080, 1920, 3), dtype=np.uint8)
+            worker._draw_burnins(img, 1050)
+            self.assertTrue(np.any(img > 0))
+
+        core.loader.stop()
+
+    def test_export_dialog_get_fps(self):
+        """Verify ExportDialog._get_fps works properly."""
+        from gui.export_dialog import ExportDialog
+        core = PlayerCore()
+        dlg = ExportDialog(None, core)
+        fps = dlg._get_fps()
+        self.assertIsInstance(fps, float)
+        self.assertGreater(fps, 0.0)
+        core.loader.stop()
+
 def run_tests_manually():
     print("RUNNING TESTS MANUALLY...")
     suite = TestExportPipeline()

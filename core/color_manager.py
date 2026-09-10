@@ -108,6 +108,40 @@ class ColorManager:
         except Exception:
             pass
 
+    def set_config_path(self, new_path: str) -> bool:
+        """Switch OCIO config at runtime and reload available color spaces."""
+        if not new_path or not os.path.isfile(new_path):
+            return False
+        self.config_path = new_path
+        self.colorspaces = []
+        self.input_choices = []
+        self.output_choices = []
+        self.view_choices = []
+        self.displays = {}
+        self._init_ocio()
+        return self.config is not None
+
+    def get_config_info(self) -> dict:
+        """Inspect and return metadata about the active OCIO config."""
+        info = {
+            "loaded": self.config is not None,
+            "config_path": self.config_path or "",
+            "total_colorspaces": len(self.colorspaces),
+            "input_colorspaces": list(self.input_choices),
+            "output_colorspaces": list(self.output_choices),
+            "views": list(self.view_choices),
+            "displays": {k: list(v) for k, v in getattr(self, 'displays', {}).items()},
+            "active_input": self.input_cs,
+            "active_output": self.output_cs,
+            "ocio_enabled": self.ocio_enabled,
+        }
+        if self.config is not None:
+            if hasattr(self.config, 'getDescription'):
+                info["description"] = self.config.getDescription()
+            if hasattr(self.config, 'getMajorVersion'):
+                info["version"] = f"{self.config.getMajorVersion()}.{self.config.getMinorVersion()}"
+        return info
+
     def rebuild_processor(self):
         if not self.ocio_enabled or not (self.config and self.input_cs and self.output_cs):
             self.processor = None

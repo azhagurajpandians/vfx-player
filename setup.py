@@ -173,7 +173,7 @@ base = "Win32GUI" if sys.platform == "win32" else None
 setup(
     name="VFX Review Player",
     version="1.0",
-    description="High-performance VFX sequence player with ACES color management",
+    description="VFX Review Player",
     options={"build_exe": build_exe_options},
     executables=[
         Executable(

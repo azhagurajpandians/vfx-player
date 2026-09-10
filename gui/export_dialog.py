@@ -31,7 +31,8 @@ class ExportWorker(QtCore.QThread):
 
     def __init__(self, core, output_path, start_frame, end_frame, format_preset,
                  width, height, aspect_mode, fps, apply_ocio, apply_grade,
-                 burnin_options, include_audio, exposure=0.0, gamma=1.0):
+                 burnin_options, include_audio, exposure=0.0, gamma=1.0,
+                 color_snapshot=None, slate_options=None):
         super().__init__()
         self.core = core
         self.output_path = output_path
@@ -48,7 +49,16 @@ class ExportWorker(QtCore.QThread):
         self.include_audio = include_audio
         self.exposure = exposure
         self.gamma = gamma
+        self.slate_options = slate_options or {}
         self.is_cancelled = False
+
+        from core.color_pipeline import ColorPipeline, ColorState
+        if color_snapshot:
+            self.color_pipeline = ColorPipeline.from_snapshot(color_snapshot)
+        elif hasattr(core, 'color_pipeline') and core.color_pipeline:
+            self.color_pipeline = ColorPipeline.from_snapshot(core.color_pipeline.snapshot())
+        else:
+            self.color_pipeline = ColorPipeline(ColorState(exposure=exposure, gamma=gamma))
 
     def cancel(self):
         self.is_cancelled = True
@@ -112,12 +122,28 @@ class ExportWorker(QtCore.QThread):
                 print(f"Error checking audio: {e}")
 
         # Set export format video codecs and parameters
-        if self.format_preset == 'mp4':
+        if self.format_preset in ('mp4', 'mov_h264'):
             cmd.extend([
                 '-c:v', 'libx264',
                 '-pix_fmt', 'yuv420p',
                 '-crf', '18',
                 '-preset', 'medium'
+            ])
+        elif self.format_preset in ('mp4_h265', 'mov_h265'):
+            cmd.extend([
+                '-c:v', 'libx265',
+                '-pix_fmt', 'yuv420p',
+                '-crf', '23',
+                '-preset', 'medium',
+                '-tag:v', 'hvc1'
+            ])
+        elif self.format_preset == 'mp4_h265_hq':
+            cmd.extend([
+                '-c:v', 'libx265',
+                '-pix_fmt', 'yuv420p10le',
+                '-crf', '20',
+                '-preset', 'medium',
+                '-tag:v', 'hvc1'
             ])
         elif self.format_preset == 'prores_hq':
             cmd.extend([
@@ -198,6 +224,18 @@ class ExportWorker(QtCore.QThread):
                     print(f"Failed to load OCIO configuration in Export: {e}")
 
             start_time = time.time()
+
+            # Prepend delivery slate frame(s) if enabled
+            if self.slate_options and self.slate_options.get('enabled', False):
+                try:
+                    from core.slate_builder import SlateBuilder, SlateConfig
+                    slate_cfg = SlateConfig.from_dict(self.slate_options.get('config', {}))
+                    slate_rgb = SlateBuilder.create_slate(target_w, target_h, slate_cfg)
+                    duration_frames = max(1, int(self.slate_options.get('duration_frames', 1)))
+                    for _ in range(duration_frames):
+                        proc.stdin.write(slate_rgb.tobytes())
+                except Exception as e:
+                    print(f"Error generating delivery slate: {e}")
 
             # Transcode frame-by-frame loop
             for idx, frame_idx in enumerate(range(self.start_frame, self.end_frame + 1)):
@@ -313,13 +351,29 @@ class ExportWorker(QtCore.QThread):
             print(f"Error reading {path} during export: {e}")
         return None
 
-    def _process_color(self, img, ocio_config):
-        """Transform colorspaces (OCIO) and apply viewer gain/gamma."""
-        # 1. Video files are uint8
+    def _process_color(self, img, ocio_config=None):
+        """Transform colorspaces (OCIO) and apply authoritative viewer color pipeline."""
+        if getattr(self, 'color_pipeline', None) is not None:
+            # Synchronize OCIO parameters from loader if not set in pipeline
+            if hasattr(self.core, 'loader'):
+                if not self.color_pipeline.state.input_cs:
+                    self.color_pipeline.state.input_cs = getattr(self.core.loader, 'ocio_input_cs', None)
+                if not self.color_pipeline.state.output_cs:
+                    self.color_pipeline.state.output_cs = getattr(self.core.loader, 'ocio_output_cs', None)
+                if not self.color_pipeline.state.ocio_config_path:
+                    self.color_pipeline.state.ocio_config_path = getattr(self.core.loader, 'ocio_config_path', None)
+
+            return self.color_pipeline.process(
+                img,
+                apply_ocio=self.apply_ocio,
+                apply_grade=self.apply_grade,
+                to_uint8=True
+            )
+
+        # Fallback if no color_pipeline is attached
         if img.dtype == np.uint8:
             if not self.apply_grade:
                 return img
-            # Grade uint8 directly
             img_float = img.astype(np.float32) / 255.0
             if self.exposure != 0.0:
                 img_float *= pow(2.0, self.exposure)
@@ -328,8 +382,6 @@ class ExportWorker(QtCore.QThread):
                 np.power(img_float, 1.0 / self.gamma, out=img_float)
             return np.clip(img_float * 255.0, 0, 255).astype(np.uint8)
 
-        # 2. Float32 images (EXR)
-        # Apply OCIO if config and colorspaces are available
         if ocio_config and self.apply_ocio:
             try:
                 import OpenImageIO as oiio
@@ -339,11 +391,9 @@ class ExportWorker(QtCore.QThread):
                 spec = oiio.ImageSpec(w, h, c, oiio.TypeFloat)
                 buf = oiio.ImageBuf(spec)
                 buf.set_pixels(oiio.ROI(), img)
-                
-                in_cs = self.core.loader.ocio_input_cs
-                out_cs = self.core.loader.ocio_output_cs
-                cfg_path = self.core.loader.ocio_config_path or ""
-                
+                in_cs = getattr(self.core.loader, 'ocio_input_cs', None)
+                out_cs = getattr(self.core.loader, 'ocio_output_cs', None)
+                cfg_path = getattr(self.core.loader, 'ocio_config_path', None) or ""
                 res_buf = oiio.ImageBufAlgo.colorconvert(buf, in_cs, out_cs, False, cfg_path)
                 if not res_buf.has_error:
                     raw = res_buf.get_pixels(oiio.TypeFloat)
@@ -351,7 +401,6 @@ class ExportWorker(QtCore.QThread):
             except Exception as e:
                 print(f"OCIO color conversion failed in export: {e}")
 
-        # Apply gain/gamma adjustments
         if self.apply_grade:
             if self.exposure != 0.0:
                 img *= pow(2.0, self.exposure)
@@ -359,7 +408,6 @@ class ExportWorker(QtCore.QThread):
                 np.clip(img, 0.0, None, out=img)
                 img = np.power(img, 1.0 / self.gamma)
 
-        # Clamp and cast to uint8
         return np.clip(img * 255.0, 0.0, 255.0).astype(np.uint8)
 
     def _apply_aspect_ratio(self, img, target_w, target_h, mode):
@@ -436,52 +484,96 @@ class ExportWorker(QtCore.QThread):
         margin = int(24 * (h / 1080.0))
         margin = max(10, margin)
 
-        # 1. Top Left: Studio Name
-        studio = self.burnin_options.get('studio', '').strip()
-        if studio:
-            self._draw_text(img_uint8, studio, "top_left", font, font_scale, font_thickness, margin, bg_alpha)
-
-        # 2. Top Center: Shot Name
-        shot = self.burnin_options.get('shot', '').strip()
-        if shot:
-            self._draw_text(img_uint8, shot, "top_center", font, font_scale, font_thickness, margin, bg_alpha)
-
-        # 3. Top Right: Task Name
-        task = self.burnin_options.get('task', '').strip()
-        if task:
-            self._draw_text(img_uint8, task, "top_right", font, font_scale, font_thickness, margin, bg_alpha)
-
-        # 4. Bottom Left: Date (YYYY-MM-DD)
-        date_str = datetime.date.today().strftime('%Y-%m-%d')
-        self._draw_text(img_uint8, date_str, "bottom_left", font, font_scale, font_thickness, margin, bg_alpha)
-
-        # 5. Bottom Center: Project Code
-        proj_code = self.burnin_options.get('proj_code', '').strip()
-        if proj_code:
-            self._draw_text(img_uint8, proj_code, "bottom_center", font, font_scale, font_thickness, margin, bg_alpha)
-
-        # 6. Bottom Right: Start Frame - Current Frame - End Frame
+        # Compute frame numbers and timecode
         user_start_frame = self.burnin_options.get('start_frame_val', 0)
         curr_frame_val = user_start_frame + (frame_idx - self.start_frame)
         total_frames = self.end_frame - self.start_frame + 1
         user_end_frame = user_start_frame + total_frames - 1
 
-        # Use parsed file digits if sequence number mode is available
-        if self.core.media.type == 'sequence' and self.core.sequence:
-            path = self.core.sequence[frame_idx]
-            filename = os.path.basename(path)
-            match = re.findall(r'\d+', os.path.splitext(filename)[0])
-            if match:
-                file_frame_digit = int(match[-1])
-                seq_start_val = file_frame_digit - (frame_idx - self.start_frame)
-                seq_end_val = seq_start_val + total_frames - 1
-                frame_str = f"{seq_start_val} - {file_frame_digit} - {seq_end_val}"
+        file_frame_digit = curr_frame_val
+        filename = ""
+        if self.core.media:
+            if self.core.media.type == 'sequence' and self.core.sequence:
+                path = self.core.sequence[frame_idx]
+                filename = os.path.basename(path)
+                match = re.findall(r'\d+', os.path.splitext(filename)[0])
+                if match:
+                    file_frame_digit = int(match[-1])
+                    seq_start_val = file_frame_digit - (frame_idx - self.start_frame)
+                    seq_end_val = seq_start_val + total_frames - 1
+                    frame_str = f"{seq_start_val} - {file_frame_digit} - {seq_end_val}"
+                else:
+                    frame_str = f"{user_start_frame} - {curr_frame_val} - {user_end_frame}"
             else:
+                filename = os.path.basename(self.core.media.path)
                 frame_str = f"{user_start_frame} - {curr_frame_val} - {user_end_frame}"
         else:
             frame_str = f"{user_start_frame} - {curr_frame_val} - {user_end_frame}"
-        
-        self._draw_text(img_uint8, frame_str, "bottom_right", font, font_scale, font_thickness, margin, bg_alpha)
+
+        from core.timeline_service import TimelineService, frame_to_timecode
+        fps_val = self.fps or 24.0
+        timecode_str = frame_to_timecode(file_frame_digit, fps_val)
+
+        studio = self.burnin_options.get('studio', '').strip()
+        shot = self.burnin_options.get('shot', '').strip()
+        task = self.burnin_options.get('task', '').strip()
+        proj_code = self.burnin_options.get('proj_code', '').strip()
+        version_str = self.burnin_options.get('version', 'v001').strip()
+        artist_str = self.burnin_options.get('artist', '').strip()
+        colorspace_str = self.burnin_options.get('colorspace', 'ACEScg').strip()
+        preset = self.burnin_options.get('preset', 'vfx_ref')
+        date_str = datetime.date.today().strftime('%Y-%m-%d')
+
+        if preset == 'client_review':
+            # Client Review: Shot, Version, Timecode, Frame
+            if shot:
+                self._draw_text(img_uint8, shot, "top_left", font, font_scale, font_thickness, margin, bg_alpha)
+            if version_str:
+                self._draw_text(img_uint8, version_str, "top_right", font, font_scale, font_thickness, margin, bg_alpha)
+            self._draw_text(img_uint8, f"TC {timecode_str}", "bottom_left", font, font_scale, font_thickness, margin, bg_alpha)
+            self._draw_text(img_uint8, f"FR {file_frame_digit}", "bottom_right", font, font_scale, font_thickness, margin, bg_alpha)
+
+        elif preset == 'internal_vfx':
+            # Internal VFX: Shot | Version, Artist/Task, Colorspace, TC, Frame
+            top_l = f"{shot} | {version_str}" if version_str else shot
+            if top_l:
+                self._draw_text(img_uint8, top_l, "top_left", font, font_scale, font_thickness, margin, bg_alpha)
+            task_artist = f"{task} ({artist_str})" if (task and artist_str) else (task or artist_str)
+            if task_artist:
+                self._draw_text(img_uint8, task_artist, "top_center", font, font_scale, font_thickness, margin, bg_alpha)
+            if colorspace_str:
+                self._draw_text(img_uint8, colorspace_str, "top_right", font, font_scale, font_thickness, margin, bg_alpha)
+            self._draw_text(img_uint8, f"TC {timecode_str}", "bottom_left", font, font_scale, font_thickness, margin, bg_alpha)
+            self._draw_text(img_uint8, frame_str, "bottom_right", font, font_scale, font_thickness, margin, bg_alpha)
+
+        elif preset == 'dailies':
+            # Dailies: Shot & Version, Task, Filename, Timecode, Frame
+            top_l = f"{shot} {version_str}" if version_str else shot
+            if top_l:
+                self._draw_text(img_uint8, top_l, "top_left", font, font_scale, font_thickness, margin, bg_alpha)
+            if task:
+                self._draw_text(img_uint8, task, "top_right", font, font_scale, font_thickness, margin, bg_alpha)
+            if filename:
+                self._draw_text(img_uint8, filename, "bottom_left", font, font_scale, font_thickness, margin, bg_alpha)
+            self._draw_text(img_uint8, timecode_str, "bottom_center", font, font_scale, font_thickness, margin, bg_alpha)
+            self._draw_text(img_uint8, frame_str, "bottom_right", font, font_scale, font_thickness, margin, bg_alpha)
+
+        else:
+            # Full VFX Reference / Custom
+            if studio:
+                self._draw_text(img_uint8, studio, "top_left", font, font_scale, font_thickness, margin, bg_alpha)
+            if shot:
+                self._draw_text(img_uint8, shot, "top_center", font, font_scale, font_thickness, margin, bg_alpha)
+            if task:
+                self._draw_text(img_uint8, task, "top_right", font, font_scale, font_thickness, margin, bg_alpha)
+
+            show_tc = self.burnin_options.get('show_timecode', True)
+            b_left = f"{date_str}  TC:{timecode_str}" if show_tc else date_str
+            self._draw_text(img_uint8, b_left, "bottom_left", font, font_scale, font_thickness, margin, bg_alpha)
+
+            if proj_code:
+                self._draw_text(img_uint8, proj_code, "bottom_center", font, font_scale, font_thickness, margin, bg_alpha)
+            self._draw_text(img_uint8, frame_str, "bottom_right", font, font_scale, font_thickness, margin, bg_alpha)
 
         # 7. Logo Watermark overlay (centered on the screen)
         logo_path = self.burnin_options.get('logo_path', '').strip()
@@ -585,6 +677,38 @@ class ExportWorker(QtCore.QThread):
         return 0
 
 
+class SlatePreviewDialog(QtWidgets.QDialog):
+    """Modal preview window for generated delivery slate frames."""
+    def __init__(self, parent, slate_rgb: np.ndarray):
+        super().__init__(parent)
+        self.setWindowTitle("Delivery Slate Preview")
+        self.resize(980, 580)
+        self.setStyleSheet("background-color: #16181c; color: #eee; font-family: 'Segoe UI', sans-serif;")
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(15, 15, 15, 15)
+        lay.setSpacing(10)
+
+        lbl = QtWidgets.QLabel()
+        lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        lbl.setStyleSheet("background-color: #0d0e11; border: 1px solid #333; border-radius: 4px;")
+        
+        h, w, ch = slate_rgb.shape
+        bytes_per_line = ch * w
+        qimg = QtGui.QImage(slate_rgb.data, w, h, bytes_per_line, QtGui.QImage.Format.Format_RGB888)
+        pix = QtGui.QPixmap.fromImage(qimg).scaled(940, 500, QtCore.Qt.AspectRatioMode.KeepAspectRatio, QtCore.Qt.TransformationMode.SmoothTransformation)
+        lbl.setPixmap(pix)
+        lay.addWidget(lbl)
+
+        btn_box = QtWidgets.QHBoxLayout()
+        btn_box.addStretch()
+        close_btn = QtWidgets.QPushButton("Close Preview")
+        close_btn.setStyleSheet("background-color: #0078d4; color: white; padding: 6px 16px; border-radius: 4px; font-weight: 500;")
+        close_btn.clicked.connect(self.accept)
+        btn_box.addWidget(close_btn)
+        btn_box.addStretch()
+        lay.addLayout(btn_box)
+
+
 class ExportDialog(QtWidgets.QDialog):
     """
     Export Settings window matching the clean layout with simplified fixed overlays.
@@ -673,6 +797,26 @@ class ExportDialog(QtWidgets.QDialog):
                 background-color: #0078d4;
                 border-radius: 2px;
             }
+            QTabWidget::pane {
+                border: 1px solid #333;
+                background: #18191c;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QTabBar::tab {
+                background: #25262a;
+                color: #bbb;
+                padding: 7px 16px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                margin-right: 3px;
+                font-weight: 500;
+            }
+            QTabBar::tab:selected {
+                background: #0078d4;
+                color: white;
+                font-weight: bold;
+            }
         """)
 
         # Main Vertical Layout
@@ -707,10 +851,14 @@ class ExportDialog(QtWidgets.QDialog):
         fr_grid.addWidget(QtWidgets.QLabel("Format Preset:"), 0, 0)
         self.format_combo = QtWidgets.QComboBox()
         self.format_combo.addItem("MP4 (H.264 / AAC)", "mp4")
+        self.format_combo.addItem("MP4 (H.265 / HEVC)", "mp4_h265")
+        self.format_combo.addItem("MP4 (H.265 10-bit HQ)", "mp4_h265_hq")
         self.format_combo.addItem("MOV (ProRes 422 HQ)", "prores_hq")
         self.format_combo.addItem("MOV (ProRes 422 Standard)", "prores_std")
         self.format_combo.addItem("MOV (ProRes 4444)", "prores_4444")
         self.format_combo.addItem("MOV (DNxHR HQ)", "dnxhr_hq")
+        self.format_combo.addItem("MOV (H.264)", "mov_h264")
+        self.format_combo.addItem("MOV (H.265 / HEVC)", "mov_h265")
         self.format_combo.currentIndexChanged.connect(self._format_changed)
         fr_grid.addWidget(self.format_combo, 0, 1)
 
@@ -718,6 +866,12 @@ class ExportDialog(QtWidgets.QDialog):
         fr_grid.addWidget(QtWidgets.QLabel("Frame Range:"), 0, 2)
         self.range_combo = QtWidgets.QComboBox()
         self.range_combo.addItem("Entire Sequence", "full")
+        r_in = getattr(parent, 'range_in', 0)
+        total_fc = self.core.frame_count() if (self.core and self.core.media) else 0
+        r_out = getattr(parent, 'range_out', max(0, total_fc - 1))
+        has_in_out = (r_in > 0 or (total_fc > 0 and r_out < (total_fc - 1)))
+        if has_in_out:
+            self.range_combo.addItem(f"In/Out Range ({r_in} - {r_out})", "in_out")
         self.range_combo.addItem("Current Frame", "current")
         self.range_combo.addItem("Custom Range", "custom")
         self.range_combo.currentIndexChanged.connect(self._range_changed)
@@ -754,8 +908,15 @@ class ExportDialog(QtWidgets.QDialog):
 
         # Defaults range
         if self.core.media:
-            self.start_spin.setValue(0)
-            self.end_spin.setValue(self.core.frame_count() - 1)
+            if has_in_out:
+                self.start_spin.setValue(r_in)
+                self.end_spin.setValue(r_out)
+                idx_io = self.range_combo.findData("in_out")
+                if idx_io >= 0:
+                    self.range_combo.setCurrentIndex(idx_io)
+            else:
+                self.start_spin.setValue(0)
+                self.end_spin.setValue(self.core.frame_count() - 1)
             self.start_spin.setEnabled(False)
             self.end_spin.setEnabled(False)
 
@@ -783,12 +944,31 @@ class ExportDialog(QtWidgets.QDialog):
         burn_layout = QtWidgets.QVBoxLayout(burn_group)
         burn_layout.setSpacing(10)
 
+        burn_header = QtWidgets.QHBoxLayout()
         self.burn_chk = QtWidgets.QCheckBox("Enable Burn-ins")
         self.burn_chk.setChecked(True)
         self.burn_chk.stateChanged.connect(self._toggle_burn_inputs)
-        burn_layout.addWidget(self.burn_chk)
+        burn_header.addWidget(self.burn_chk)
 
-        # Form grid for text field entries (Studio Name, Shot, Task, Project Code, Logo)
+        burn_header.addSpacing(20)
+        burn_header.addWidget(QtWidgets.QLabel("Preset:"))
+        self.preset_combo = QtWidgets.QComboBox()
+        self.preset_combo.addItem("Full VFX Reference", "vfx_ref")
+        self.preset_combo.addItem("Client Review (Shot / Ver / TC / FR)", "client_review")
+        self.preset_combo.addItem("Internal VFX (Shot / Ver / Artist / CS / TC)", "internal_vfx")
+        self.preset_combo.addItem("Dailies (Shot / Ver / Task / TC / File)", "dailies")
+        self.preset_combo.addItem("Custom", "custom")
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+        burn_header.addWidget(self.preset_combo)
+
+        burn_header.addSpacing(15)
+        self.timecode_chk = QtWidgets.QCheckBox("SMPTE Timecode")
+        self.timecode_chk.setChecked(True)
+        burn_header.addWidget(self.timecode_chk)
+        burn_header.addStretch()
+        burn_layout.addLayout(burn_header)
+
+        # Form grid for text field entries
         fields_grid = QtWidgets.QGridLayout()
         fields_grid.setSpacing(6)
 
@@ -797,21 +977,30 @@ class ExportDialog(QtWidgets.QDialog):
         fields_grid.addWidget(self.studio_edit, 0, 1)
 
         fields_grid.addWidget(QtWidgets.QLabel("Task Name:"), 0, 2)
-        self.task_edit = QtWidgets.QLineEdit("Edit")
+        self.task_edit = QtWidgets.QLineEdit("Comp")
         fields_grid.addWidget(self.task_edit, 0, 3)
 
         fields_grid.addWidget(QtWidgets.QLabel("Shot Name:"), 1, 0)
-        self.shot_edit = QtWidgets.QLineEdit("fhgcn")
+        shot_def = "SHOT_010"
         if self.core.media:
-            self.shot_edit.setText(os.path.basename(self.core.media.path))
+            shot_def = os.path.basename(self.core.media.path)
+        self.shot_edit = QtWidgets.QLineEdit(shot_def)
         fields_grid.addWidget(self.shot_edit, 1, 1)
 
-        fields_grid.addWidget(QtWidgets.QLabel("Project Code:"), 1, 2)
+        fields_grid.addWidget(QtWidgets.QLabel("Version:"), 1, 2)
+        self.ver_edit = QtWidgets.QLineEdit("v001")
+        fields_grid.addWidget(self.ver_edit, 1, 3)
+
+        fields_grid.addWidget(QtWidgets.QLabel("Artist:"), 2, 0)
+        self.artist_edit = QtWidgets.QLineEdit("Lead Artist")
+        fields_grid.addWidget(self.artist_edit, 2, 1)
+
+        fields_grid.addWidget(QtWidgets.QLabel("Project Code:"), 2, 2)
         self.proj_edit = QtWidgets.QLineEdit("KNK")
-        fields_grid.addWidget(self.proj_edit, 1, 3)
+        fields_grid.addWidget(self.proj_edit, 2, 3)
 
         # Logo Watermark selection row
-        fields_grid.addWidget(QtWidgets.QLabel("Logo Watermark:"), 2, 0)
+        fields_grid.addWidget(QtWidgets.QLabel("Logo Watermark:"), 3, 0)
         logo_lay = QtWidgets.QHBoxLayout()
         self.logo_path_edit = QtWidgets.QLineEdit()
         self.logo_path_edit.setPlaceholderText("Select logo image to bake in center...")
@@ -820,11 +1009,11 @@ class ExportDialog(QtWidgets.QDialog):
         self.logo_browse.clicked.connect(self._browse_logo)
         logo_lay.addWidget(self.logo_path_edit)
         logo_lay.addWidget(self.logo_browse)
-        fields_grid.addLayout(logo_lay, 2, 1, 1, 3)
+        fields_grid.addLayout(logo_lay, 3, 1, 1, 3)
 
         burn_layout.addLayout(fields_grid)
 
-        # Style adjusters grid (2-row grid instead of single squished row)
+        # Style adjusters grid (2-row grid)
         style_grid = QtWidgets.QGridLayout()
         style_grid.setSpacing(8)
         style_grid.setContentsMargins(0, 5, 0, 0)
@@ -887,7 +1076,99 @@ class ExportDialog(QtWidgets.QDialog):
         style_grid.addLayout(logo_op_lay, 2, 1, 1, 3)
 
         burn_layout.addLayout(style_grid)
-        self.layout.addWidget(burn_group)
+
+        # 4. Delivery Slate Options Group Box
+        slate_group = QtWidgets.QGroupBox("Delivery Slate Options")
+        slate_layout = QtWidgets.QVBoxLayout(slate_group)
+        slate_layout.setSpacing(10)
+
+        slate_header = QtWidgets.QHBoxLayout()
+        self.slate_chk = QtWidgets.QCheckBox("Prepend Delivery Slate Frame")
+        self.slate_chk.setChecked(False)
+        self.slate_chk.stateChanged.connect(self._toggle_slate_inputs)
+        slate_header.addWidget(self.slate_chk)
+        slate_header.addStretch()
+
+        slate_header.addWidget(QtWidgets.QLabel("Duration:"))
+        self.slate_duration_spin = QtWidgets.QSpinBox()
+        self.slate_duration_spin.setRange(1, 120)
+        self.slate_duration_spin.setValue(1)
+        self.slate_duration_spin.setSuffix(" frame(s)")
+        slate_header.addWidget(self.slate_duration_spin)
+
+        self.slate_preview_btn = QtWidgets.QPushButton("Preview Slate...")
+        self.slate_preview_btn.setStyleSheet("background-color: #333; padding: 4px 12px;")
+        self.slate_preview_btn.clicked.connect(self._on_slate_preview)
+        slate_header.addWidget(self.slate_preview_btn)
+        slate_layout.addLayout(slate_header)
+
+        slate_grid = QtWidgets.QGridLayout()
+        slate_grid.setSpacing(6)
+
+        slate_grid.addWidget(QtWidgets.QLabel("Show / Production:"), 0, 0)
+        self.slate_show_edit = QtWidgets.QLineEdit("FEATURE FILM")
+        slate_grid.addWidget(self.slate_show_edit, 0, 1)
+
+        slate_grid.addWidget(QtWidgets.QLabel("Sequence:"), 0, 2)
+        self.slate_seq_edit = QtWidgets.QLineEdit("SEQ01")
+        slate_grid.addWidget(self.slate_seq_edit, 0, 3)
+
+        slate_grid.addWidget(QtWidgets.QLabel("Shot:"), 1, 0)
+        self.slate_shot_edit = QtWidgets.QLineEdit(shot_def)
+        slate_grid.addWidget(self.slate_shot_edit, 1, 1)
+
+        slate_grid.addWidget(QtWidgets.QLabel("Version:"), 1, 2)
+        self.slate_ver_edit = QtWidgets.QLineEdit("v001")
+        slate_grid.addWidget(self.slate_ver_edit, 1, 3)
+
+        slate_grid.addWidget(QtWidgets.QLabel("Artist:"), 2, 0)
+        self.slate_artist_edit = QtWidgets.QLineEdit("Lead Compositor")
+        slate_grid.addWidget(self.slate_artist_edit, 2, 1)
+
+        slate_grid.addWidget(QtWidgets.QLabel("Department:"), 2, 2)
+        self.slate_dept_edit = QtWidgets.QLineEdit("Comp / VFX")
+        slate_grid.addWidget(self.slate_dept_edit, 2, 3)
+
+        slate_grid.addWidget(QtWidgets.QLabel("Colorspace:"), 3, 0)
+        active_cs = "ACEScg"
+        if hasattr(self.core, 'loader') and hasattr(self.core.loader, 'output_cs') and self.core.loader.output_cs:
+            active_cs = self.core.loader.output_cs
+        self.slate_cs_edit = QtWidgets.QLineEdit(active_cs)
+        slate_grid.addWidget(self.slate_cs_edit, 3, 1)
+
+        slate_grid.addWidget(QtWidgets.QLabel("Notes:"), 3, 2)
+        self.slate_notes_edit = QtWidgets.QLineEdit("Review Delivery")
+        slate_grid.addWidget(self.slate_notes_edit, 3, 3)
+
+        slate_layout.addLayout(slate_grid)
+        self._toggle_slate_inputs(False)
+
+        # Assemble Tabs
+        self.tab_widget = QtWidgets.QTabWidget()
+
+        tab_format = QtWidgets.QWidget()
+        tab_format_lay = QtWidgets.QVBoxLayout(tab_format)
+        tab_format_lay.setContentsMargins(8, 8, 8, 8)
+        tab_format_lay.addWidget(fr_group)
+        tab_format_lay.addLayout(chk_layout)
+        tab_format_lay.addStretch()
+        self.tab_widget.addTab(tab_format, "Video & Format")
+
+        tab_burn = QtWidgets.QWidget()
+        tab_burn_lay = QtWidgets.QVBoxLayout(tab_burn)
+        tab_burn_lay.setContentsMargins(8, 8, 8, 8)
+        tab_burn_lay.addWidget(burn_group)
+        tab_burn_lay.addStretch()
+        self.tab_widget.addTab(tab_burn, "Burn-In Overlays")
+
+        tab_slate = QtWidgets.QWidget()
+        tab_slate_lay = QtWidgets.QVBoxLayout(tab_slate)
+        tab_slate_lay.setContentsMargins(8, 8, 8, 8)
+        tab_slate_lay.addWidget(slate_group)
+        tab_slate_lay.addStretch()
+        self.tab_widget.addTab(tab_slate, "Delivery Slate")
+
+        self.layout.addWidget(self.tab_widget)
 
         # 5. Progress Row
         self.progress_bar = QtWidgets.QProgressBar()
@@ -919,10 +1200,14 @@ class ExportDialog(QtWidgets.QDialog):
         self.worker = None
 
     def _toggle_burn_inputs(self, state):
-        enabled = (state == 2)
+        enabled = (state == 2 or state is True)
+        if hasattr(self, 'preset_combo'): self.preset_combo.setEnabled(enabled)
+        if hasattr(self, 'timecode_chk'): self.timecode_chk.setEnabled(enabled)
         self.studio_edit.setEnabled(enabled)
         self.task_edit.setEnabled(enabled)
         self.shot_edit.setEnabled(enabled)
+        if hasattr(self, 'ver_edit'): self.ver_edit.setEnabled(enabled)
+        if hasattr(self, 'artist_edit'): self.artist_edit.setEnabled(enabled)
         self.proj_edit.setEnabled(enabled)
         self.logo_path_edit.setEnabled(enabled)
         self.logo_browse.setEnabled(enabled)
@@ -932,14 +1217,75 @@ class ExportDialog(QtWidgets.QDialog):
         self.opacity_slider.setEnabled(enabled)
         self.logo_op_slider.setEnabled(enabled)
 
+    def _toggle_slate_inputs(self, state):
+        enabled = (state == 2 or state is True)
+        self.slate_show_edit.setEnabled(enabled)
+        self.slate_seq_edit.setEnabled(enabled)
+        self.slate_shot_edit.setEnabled(enabled)
+        self.slate_ver_edit.setEnabled(enabled)
+        self.slate_artist_edit.setEnabled(enabled)
+        self.slate_dept_edit.setEnabled(enabled)
+        self.slate_cs_edit.setEnabled(enabled)
+        self.slate_notes_edit.setEnabled(enabled)
+        self.slate_duration_spin.setEnabled(enabled)
+        self.slate_preview_btn.setEnabled(enabled)
+
+    def _get_fps(self) -> float:
+        fps = 24.0
+        if hasattr(self, 'core') and self.core and self.core.media:
+            fps = self.core.media_fps() or 24.0
+        if hasattr(self, 'fps_combo'):
+            fps_preset = self.fps_combo.currentData()
+            if fps_preset and fps_preset != 'source':
+                try:
+                    fps = float(fps_preset)
+                except (ValueError, TypeError):
+                    pass
+        return float(fps)
+
+    def _on_preset_changed(self, idx):
+        preset = self.preset_combo.currentData()
+        if preset in ('client_review', 'internal_vfx', 'dailies'):
+            self.timecode_chk.setChecked(True)
+
+    def _on_slate_preview(self):
+        from core.slate_builder import SlateBuilder, SlateConfig
+        w, h = 1920, 1080
+        res_data = self.res_combo.currentData()
+        if res_data == '4k': w, h = 3840, 2160
+        elif res_data == '720p': w, h = 1280, 720
+        elif res_data == 'source' and self.core.media:
+            w = getattr(self.core.media, 'width', 1920) or 1920
+            h = getattr(self.core.media, 'height', 1080) or 1080
+
+        fps = self._get_fps()
+        cfg = SlateConfig(
+            show=self.slate_show_edit.text().strip(),
+            sequence=self.slate_seq_edit.text().strip(),
+            shot=self.slate_shot_edit.text().strip(),
+            version=self.slate_ver_edit.text().strip(),
+            artist=self.slate_artist_edit.text().strip(),
+            department=self.slate_dept_edit.text().strip(),
+            colorspace=self.slate_cs_edit.text().strip(),
+            notes=self.slate_notes_edit.text().strip(),
+            studio=self.studio_edit.text().strip(),
+            fps=str(fps),
+            resolution=f"{w} x {h}",
+            frame_range=f"{self.start_spin.value()} - {self.end_spin.value()}",
+            logo_path=self.logo_path_edit.text().strip()
+        )
+        slate_rgb = SlateBuilder.create_slate(w, h, cfg)
+        dlg = SlatePreviewDialog(self, slate_rgb)
+        dlg.exec()
+
     def _format_changed(self):
-        preset = self.format_combo.currentData()
+        preset = str(self.format_combo.currentData() or '')
         path = self.path_edit.text().strip()
         if not path:
             return
             
         base, ext = os.path.splitext(path)
-        new_ext = ".mp4" if preset == 'mp4' else ".mov"
+        new_ext = ".mp4" if preset.startswith('mp4') else ".mov"
         self.path_edit.setText(base + new_ext)
 
     def _range_changed(self):
@@ -947,6 +1293,13 @@ class ExportDialog(QtWidgets.QDialog):
         if mode == 'full':
             self.start_spin.setValue(0)
             self.end_spin.setValue(self.core.frame_count() - 1)
+            self.start_spin.setEnabled(False)
+            self.end_spin.setEnabled(False)
+        elif mode == 'in_out':
+            r_in = getattr(self.parent(), 'range_in', 0)
+            r_out = getattr(self.parent(), 'range_out', self.core.frame_count() - 1 if self.core.media else 0)
+            self.start_spin.setValue(r_in)
+            self.end_spin.setValue(r_out)
             self.start_spin.setEnabled(False)
             self.end_spin.setEnabled(False)
         elif mode == 'current':
@@ -960,8 +1313,8 @@ class ExportDialog(QtWidgets.QDialog):
             self.end_spin.setEnabled(True)
 
     def _browse_output(self):
-        preset = self.format_combo.currentData()
-        filt = "MP4 Video (*.mp4)" if preset == 'mp4' else "MOV Video (*.mov)"
+        preset = str(self.format_combo.currentData() or '')
+        filt = "MP4 Video (*.mp4)" if preset.startswith('mp4') else "MOV Video (*.mov)"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Save Transcode Video", self.path_edit.text(), f"{filt};;All Files (*.*)"
         )
@@ -1019,6 +1372,8 @@ class ExportDialog(QtWidgets.QDialog):
         # Prepare Burn-in options dict
         burnin = {
             'enabled': self.burn_chk.isChecked(),
+            'preset': self.preset_combo.currentData() if hasattr(self, 'preset_combo') else 'vfx_ref',
+            'show_timecode': self.timecode_chk.isChecked() if hasattr(self, 'timecode_chk') else True,
             'font_name': self.font_combo.currentData(),
             'font_scale': self.scale_slider.value() / 10.0,
             'font_thickness': self.thick_spin.value(),
@@ -1026,10 +1381,34 @@ class ExportDialog(QtWidgets.QDialog):
             'studio': self.studio_edit.text().strip(),
             'task': self.task_edit.text().strip(),
             'shot': self.shot_edit.text().strip(),
+            'version': self.ver_edit.text().strip() if hasattr(self, 'ver_edit') else 'v001',
+            'artist': self.artist_edit.text().strip() if hasattr(self, 'artist_edit') else '',
+            'colorspace': self.slate_cs_edit.text().strip() if hasattr(self, 'slate_cs_edit') else 'ACEScg',
             'proj_code': self.proj_edit.text().strip(),
             'start_frame_val': first_frame_val,
             'logo_path': self.logo_path_edit.text().strip(),
             'logo_opacity': self.logo_op_slider.value() / 10.0,
+        }
+
+        # Prepare Delivery Slate options
+        slate_opts = {
+            'enabled': self.slate_chk.isChecked() if hasattr(self, 'slate_chk') else False,
+            'duration_frames': self.slate_duration_spin.value() if hasattr(self, 'slate_duration_spin') else 1,
+            'config': {
+                'show': self.slate_show_edit.text().strip() if hasattr(self, 'slate_show_edit') else '',
+                'sequence': self.slate_seq_edit.text().strip() if hasattr(self, 'slate_seq_edit') else '',
+                'shot': self.slate_shot_edit.text().strip() if hasattr(self, 'slate_shot_edit') else '',
+                'version': self.slate_ver_edit.text().strip() if hasattr(self, 'slate_ver_edit') else 'v001',
+                'artist': self.slate_artist_edit.text().strip() if hasattr(self, 'slate_artist_edit') else '',
+                'department': self.slate_dept_edit.text().strip() if hasattr(self, 'slate_dept_edit') else '',
+                'colorspace': self.slate_cs_edit.text().strip() if hasattr(self, 'slate_cs_edit') else 'ACEScg',
+                'notes': self.slate_notes_edit.text().strip() if hasattr(self, 'slate_notes_edit') else '',
+                'studio': self.studio_edit.text().strip(),
+                'fps': str(fps),
+                'resolution': f"{w} x {h}",
+                'frame_range': f"{self.start_spin.value()} - {self.end_spin.value()}",
+                'logo_path': self.logo_path_edit.text().strip()
+            }
         }
 
         # Check path directory
@@ -1047,6 +1426,10 @@ class ExportDialog(QtWidgets.QDialog):
         self.progress_bar.setValue(0)
         self.status_lbl.setText("Starting transcode export...")
         
+        color_snap = None
+        if hasattr(self.core, 'color_pipeline') and self.core.color_pipeline:
+            color_snap = self.core.color_pipeline.snapshot()
+
         # Start Worker QThread
         self.worker = ExportWorker(
             core=self.core,
@@ -1063,7 +1446,9 @@ class ExportDialog(QtWidgets.QDialog):
             burnin_options=burnin,
             include_audio=self.audio_chk.isChecked(),
             exposure=getattr(self.parent(), 'exposure', 0.0),
-            gamma=getattr(self.parent(), 'gamma', 1.0)
+            gamma=getattr(self.parent(), 'gamma', 1.0),
+            color_snapshot=color_snap,
+            slate_options=slate_opts
         )
         self.worker.progress.connect(self._on_progress)
         self.worker.finished.connect(self._on_finished)
@@ -1142,6 +1527,10 @@ class ExportDialog(QtWidgets.QDialog):
         self.burn_chk.setEnabled(enabled)
         self._toggle_burn_inputs(enabled and self.burn_chk.isChecked())
         
+        if hasattr(self, 'slate_chk'):
+            self.slate_chk.setEnabled(enabled)
+            self._toggle_slate_inputs(enabled and self.slate_chk.isChecked())
+            
         self.export_btn.setEnabled(enabled)
         if enabled:
             self.cancel_btn.setText("Stop Export")
