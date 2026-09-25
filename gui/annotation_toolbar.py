@@ -341,7 +341,7 @@ _TOOL_DEFS = [
 
 class AnnotationToolbar(QtWidgets.QWidget):
     """
-    Professional RV-style horizontal annotation toolbar with painted icons.
+    RV-style horizontal annotation toolbar with painted icons.
 
     Signals
     -------

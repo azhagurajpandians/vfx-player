@@ -127,7 +127,7 @@ class AboutDialog(QtWidgets.QDialog):
         # 5. Product Description
         desc_label = QtWidgets.QLabel(
             "VFX Review Player is a powerful, production-grade visual effects review and playback platform "
-            "designed for VFX professionals. It seamlessly bridges high-dynamic-range sequence inspection, "
+            "designed for VFX artists and supervisors. It seamlessly bridges high-dynamic-range sequence inspection, "
             "OpenColorIO/ACES color management, real-time comparison, and studio review workflows."
         )
         desc_label.setWordWrap(True)

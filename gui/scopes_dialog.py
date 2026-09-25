@@ -208,7 +208,7 @@ class ScopeCanvas(QtWidgets.QWidget):
 
 
 class ScopesDialog(QtWidgets.QDialog):
-    """Modeless professional Scopes HUD window showing Histogram and Waveform."""
+    """Modeless Scopes HUD window showing Histogram and Waveform."""
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)

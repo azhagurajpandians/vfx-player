@@ -98,7 +98,7 @@ def _draw_wrapped_text(
 
 
 class SlateBuilder:
-    """Builds professional delivery slates formatted for client review or dailies."""
+    """Builds delivery slates formatted for client review or dailies."""
 
     @staticmethod
     def create_slate(
@@ -596,7 +596,7 @@ class SlateBuilder:
                 logo_rendered = False
 
         if not logo_rendered:
-            # Render clean professional vendor logo typography
+            # Render clean vendor logo typography
             txt = (config.studio or "Vendor Logo")
             t_size = cv2.getTextSize(txt, cv2.FONT_HERSHEY_DUPLEX, 0.82 * scale, max(1, int(1.5 * scale)))[0]
             tx = badge_x + (badge_w - t_size[0]) // 2

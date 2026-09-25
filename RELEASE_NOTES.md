@@ -1,12 +1,12 @@
 # VFX Review Player — Release Notes
 
-## Version 1.1.3 (Current Release)
+## Version 1.1.4 (Current Release)
 
 **Release Date:** September 2026  
 **License:** GNU General Public License v3 (GPLv3)  
-**Binary Installer:** `VFX_Review_Player_Setup_v1.1.3.exe`  
+**Binary Installer:** `VFX_Review_Player_Setup_v1.1.4.exe`  
 
-VFX Review Player v1.1.3 is a major release advancing the platform into a studio-grade review, color grading, multi-shot dailies comparison, and media delivery ecosystem.
+VFX Review Player v1.1.4 is a major release advancing the platform into a studio-grade review, color grading, multi-shot dailies comparison, and media delivery ecosystem.
 
 ---
 
@@ -36,18 +36,21 @@ VFX Review Player v1.1.3 is a major release advancing the platform into a studio
 - **Automated Version Family Detection**: Scans directory structures for version tokens (`v001`, `v002`, `v003`) with keyboard switching (`Alt+Up`, `Alt+Down`) and 1-click comparison.
 - **Context Menu Actions**: Quick-play, slot assignment, version comparison, path copying, and playlist management.
 
-#### 5. OpenColorIO (OCIO v2) & Professional Video Pipelines
+#### 5. OpenColorIO (OCIO v2) & Video Pipelines
 - **Color Accuracy**: Full input colorspace, view transform, and display pipeline supporting ACEScg, ACEScc, Rec.709, sRGB, and DCI-P3.
 - **Native Video Decoding**: Hardware-accelerated decoding of Apple ProRes (422, 422 HQ, 4444, 4444 XQ), Avid DNxHR, H.264, and HEVC.
 - **Deep EXR Support**: Multi-channel and multi-part EXR inspection via OpenImageIO.
 
-#### 6. Professional Packaging & Legal Compliance
-- **Clean GNU GPLv3 License**: Cleaned license documentation featuring dedicated application header and official terms and conditions.
-- **Windows Installer**: Self-contained per-user installer (`dist_installer/VFX_Review_Player_Setup_v1.1.3.exe`) with Explorer context menu ("Open with VFX Review Player") and file associations (`.exr`, `.dpx`, `.cin`, `.mov`, `.mp4`).
+#### 6. Packaging & Legal Compliance
+- **Clean GNU GPLv3 License**: Cleaned license documentation conforming to standard FSF terms and conditions.
+- **Windows Installer**: Self-contained per-user installer (`dist_installer/VFX_Review_Player_Setup_v1.1.4.exe`) with Explorer context menu ("Open with VFX Review Player") and file associations (`.exr`, `.dpx`, `.cin`, `.mov`, `.mp4`).
 
 ---
 
 ### Previous Releases
+
+#### Version 1.1.3
+- Synchronized multi-shot grid review, 3-way ASC CDL wheels, Kitsu workflow enhancements, and documentation upgrades.
 
 #### Version 1.1.0
 - Added GPU color grading and GPUScaledTexture2D HDR EXR rendering.

@@ -1,6 +1,6 @@
 # gui/color_wheels_widget.py
 """
-Professional 3-Way Color Grading Wheels Widget for VFXPlayer.
+3-Way Color Grading Wheels Widget for VFX Review Player.
 Matches reference UI:
   - Top sliders: Contrast, Stretch, Warmer (Temperature), Greener (Tint)
   - 3 Chromatic Color Wheels: Lift, Gamma, Gain with balance pucks and master controls

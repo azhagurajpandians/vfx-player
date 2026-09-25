@@ -33,6 +33,10 @@ scratch/
 *.egg-info/
 contact_sheet*
 *.err
+-.err
+inspect_ocio*.py
+minimal.py
 prefs.json
 *Audit_Report*.md
 *.audit.md
+

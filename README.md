@@ -5,12 +5,12 @@
 </p>
 
 <p align="center">
-  <strong>Professional VFX Review, Playback, Color Grading & Media Delivery Platform</strong><br>
+  <strong>VFX Review, Playback, Color Grading & Media Delivery Platform</strong><br>
   <em>Engineered for Visual Effects Studios, Feature Films, Commercials, and Episodic Pipelines</em>
 </p>
 
 <p align="center">
-  <a href="https://github.com/azhagurajpandians/vfx-player/releases"><img src="https://img.shields.io/badge/release-v1.1.3-blue.svg?style=flat-square" alt="Release v1.1.3"></a>
+  <a href="https://github.com/azhagurajpandians/vfx-player/releases/latest"><img src="https://img.shields.io/badge/release-v1.1.4-blue.svg?style=flat-square" alt="Release v1.1.4"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-green.svg?style=flat-square" alt="License: GPLv3"></a>
   <img src="https://img.shields.io/badge/python-3.10%20%7C%203.11-blue.svg?style=flat-square" alt="Python 3.10 | 3.11">
   <img src="https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg?style=flat-square" alt="Platform Windows x64">
@@ -22,7 +22,7 @@
 
 ## 1. Overview & Visual Showcase
 
-**VFX Review Player** is an advanced, GPU-accelerated desktop platform built from the ground up to replace fragmented dailies and playback utilities. It unites high-dynamic-range EXR image sequence inspection, professional video decoding, ACES / OpenColorIO color management, real-time ASC CDL 3-way color grading, synchronized multi-shot grid comparison, production tracking via Kitsu, and automated slate/burn-in delivery rendering into a single, cohesive application.
+**VFX Review Player** is an advanced, GPU-accelerated desktop platform built from the ground up to replace fragmented dailies and playback utilities. It unites high-dynamic-range EXR image sequence inspection, production video decoding, ACES / OpenColorIO color management, real-time ASC CDL 3-way color grading, synchronized multi-shot grid comparison, production tracking via Kitsu, and automated slate/burn-in delivery rendering into a single, cohesive application.
 
 ### Synchronized Multi-Shot Grid Review (2x3 / 6-Up Mode)
 Synchronize up to 6 shots simultaneously with master transport control, independent slot assignment, and zero-drop frame scrubbing for sequence dailies and lighting continuity review.
@@ -101,7 +101,7 @@ Deterministic Multi-Format Exporter (FFmpeg & PyAV)
 
 ### 🎬 Playback & Image Sequence Engine
 - **High-Dynamic Range EXR & Sequences**: Multi-part and multi-channel `.exr`, `.sxr`, `.dpx`, `.cin`, `.tif`, `.tiff`, `.png`, `.jpg`, `.tga`, and `.webp` powered by OpenImageIO and OpenCV.
-- **Professional Video Codecs**: Hardware-accelerated decoding of Apple ProRes (422, 422 HQ, 4444, 4444 XQ), Avid DNxHR, H.264, and H.265 (HEVC) containers (`.mov`, `.mp4`, `.mkv`, `.mxf`).
+- **Industry Video Codecs**: Hardware-accelerated decoding of Apple ProRes (422, 422 HQ, 4444, 4444 XQ), Avid DNxHR, H.264, and H.265 (HEVC) containers (`.mov`, `.mp4`, `.mkv`, `.mxf`).
 - **Deterministic Timebase**: Exact frame indexing, fractional framerate precision (23.976, 24.0, 25.0, 29.97, 59.94 fps), SMPTE timecode (DF/NDF), and zero-drift A/V synchronization.
 - **Sequence Validation**: Automated missing-frame gap detection, corrupt frame notification, and timeline gap indicators.
 - **Gapless Playlist Playback**: Multithreaded `QThreadPool` pre-buffers adjacent shots to ensure seamless timeline cuts without shot-boundary buffering freezes.
@@ -167,7 +167,7 @@ Deterministic Multi-Format Exporter (FFmpeg & PyAV)
 
 ### Windows Standalone Installer
 The quickest way to install VFX Review Player on Windows 10/11 is using the self-contained installer:
-1. Download `VFX_Review_Player_Setup_v1.1.3.exe` from the [Releases](https://github.com/azhagurajpandians/vfx-player/releases) page or build it locally.
+1. Download **[VFX_Review_Player_Setup_v1.1.4.exe](https://github.com/azhagurajpandians/vfx-player/releases/download/v1.1.4/VFX_Review_Player_Setup_v1.1.4.exe)** from the [Latest Release](https://github.com/azhagurajpandians/vfx-player/releases/latest) page (or build it locally).
 2. Run the installer. It configures:
    - Non-admin user installation into `%LOCALAPPDATA%\VFX Review Player`
    - File Explorer right-click integration (**"Open with VFX Review Player"**)
@@ -211,7 +211,7 @@ Generates a zero-dependency distribution in `build/exe.win-amd64-3.11/`.
 ```powershell
 .\build_installer.bat
 ```
-Automatically compiles `dist_installer/VFX_Review_Player_Setup_v1.1.3.exe`.
+Automatically compiles `dist_installer/VFX_Review_Player_Setup_v1.1.4.exe`.
 
 ---
 
@@ -228,4 +228,4 @@ python -m unittest discover -s tests
 ## 7. License & Credits
 
 - **Author**: Azhaguraj Pandian ([@azhagurajpandians](https://github.com/azhagurajpandians))
-- **License**: Distributed under the [GNU General Public License v3 (GPLv3)](LICENSE).
+- **License**: Distributed under the [GNU General Public License v3 (GPLv3)](LICENSE). All core player modules, GLSL shaders, delivery pipelines, and installer scripts are 100% free and open-source software under the terms of the GNU General Public License v3.0.

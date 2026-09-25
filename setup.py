@@ -1,5 +1,5 @@
 """
-cx_Freeze setup script for Knack VFX Player
+cx_Freeze setup script for VFX Review Player
 """
 import sys
 import os
@@ -172,8 +172,9 @@ base = "Win32GUI" if sys.platform == "win32" else None
 
 setup(
     name="vfx-player",
-    version="1.1.3",
-    description="VFX Review Player",
+    version="1.1.4",
+    description="VFX Review Player - VFX Review, Playback & Media Delivery Platform",
+    license="GPL-3.0-or-later",
     options={"build_exe": build_exe_options},
     executables=[
         Executable(
