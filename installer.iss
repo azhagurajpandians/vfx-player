@@ -4,7 +4,7 @@
 ; =====================================================================
 
 #define MyAppName "VFX Review Player"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.3"
 #define MyAppPublisher "VFX Tools"
 #define MyAppExeName "VFX Review Player.exe"
 
@@ -20,6 +20,7 @@ PrivilegesRequired=lowest
 OutputDir=dist_installer
 OutputBaseFilename=VFX_Review_Player_Setup_v{#MyAppVersion}
 SetupIconFile=logo.ico
+LicenseFile=LICENSE
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/ultra64
 SolidCompression=yes

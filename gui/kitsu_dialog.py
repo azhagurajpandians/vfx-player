@@ -532,36 +532,31 @@ class KitsuPublishDialog(QtWidgets.QDialog):
             return
 
         if kitsu_client.is_authenticated():
+            # Prevent double-click or duplicate publish submissions
+            self.btn_publish.setEnabled(False)
             QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
             preview_uploaded = False
-            preview_error = None
+            has_attachment = bool(self.annotated_image_path and os.path.exists(self.annotated_image_path))
             try:
-                res = kitsu_client.post_task_comment(target_task_id, note, task_status_id=status_id)
-                comment_id = res.get("id") or res.get("comment_id")
-                if comment_id and self.annotated_image_path and os.path.exists(self.annotated_image_path):
-                    try:
-                        prev_res = kitsu_client.upload_comment_preview(
-                            comment_id,
-                            self.annotated_image_path,
-                            task_id=target_task_id
-                        )
-                        if prev_res:
-                            preview_uploaded = True
-                    except Exception as pe:
-                        preview_error = str(pe)
+                # post_task_comment automatically handles uploading and attaching the annotated snapshot once
+                res = kitsu_client.post_task_comment(
+                    target_task_id,
+                    note,
+                    task_status_id=status_id,
+                    attachment_path=self.annotated_image_path if has_attachment else None
+                )
+                if isinstance(res, dict) and res.get("preview_file"):
+                    preview_uploaded = True
             except Exception as e:
+                self.btn_publish.setEnabled(True)
                 QtWidgets.QApplication.restoreOverrideCursor()
                 QtWidgets.QMessageBox.critical(self, "Publish Error", f"Failed to post comment to Kitsu:\n{e}")
                 return
             finally:
                 QtWidgets.QApplication.restoreOverrideCursor()
 
-            if self.annotated_image_path and not preview_uploaded and preview_error:
-                QtWidgets.QMessageBox.warning(
-                    self, "Preview Notice",
-                    f"Review note and status were successfully published to Kitsu!\n\n"
-                    f"Note: Annotated snapshot preview attachment could not be uploaded:\n{preview_error}"
-                )
+            if has_attachment and not preview_uploaded:
+                print(f"[Kitsu] Notice: Review note posted, preview attachment may not have been accepted by server.")
 
         self.accept()
 

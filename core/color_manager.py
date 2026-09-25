@@ -25,14 +25,19 @@ class ColorManager:
 
     def _init_ocio(self):
         import sys
-        cfg_path = self.config_path or os.environ.get('OCIO_CONFIG_PATH') or os.environ.get('OCIO')
-        if not cfg_path or not os.path.isfile(cfg_path):
-            here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            if getattr(sys, 'frozen', False):
-                app_dir = os.path.dirname(sys.executable)
-            else:
-                app_dir = here
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if getattr(sys, 'frozen', False):
+            app_dir = os.path.dirname(sys.executable)
+        else:
+            app_dir = here
 
+        cfg_path = self.config_path or os.environ.get('OCIO_CONFIG_PATH') or os.environ.get('OCIO')
+        if cfg_path and not os.path.isabs(cfg_path):
+            test_p = os.path.normpath(os.path.join(app_dir, cfg_path))
+            if os.path.isfile(test_p):
+                cfg_path = test_p
+
+        if not cfg_path or not os.path.isfile(cfg_path):
             candidates = [
                 os.path.join(app_dir, 'configs', 'ocio', 'OpenColorIOConfigs', 'aces_1.2', 'config.ocio'),
                 os.path.join(app_dir, 'configs', 'ocio', 'config.ocio'),
@@ -95,15 +100,67 @@ class ColorManager:
             self.output_choices = []
             for name in self.colorspaces:
                 lname = name.lower()
-                if any(k in lname for k in ('output', 'utility', 'srgb','rec','709','display','video')):
+                # Exclude camera/raw inputs and textures from output transform list
+                if lname.startswith('input -') or lname.startswith('in_') or 'camera' in lname or 'texture' in lname:
+                    continue
+                if any(k in lname for k in ('output', 'display', 'view', 'srgb', 'rec', '709', 'video', 'utility')):
                     self.output_choices.append(name)
-            
-            if not self.input_choices and self.colorspaces: self.input_choices = self.colorspaces[:]
-            if not self.output_choices and self.colorspaces: self.output_choices = self.colorspaces[:]
-            
-            self.input_cs = self.input_choices[0] if self.input_choices else None
-            self.output_cs = self.output_choices[0] if self.output_choices else None
-            
+
+            if not self.input_choices and self.colorspaces:
+                self.input_choices = self.colorspaces[:]
+            if not self.output_choices and self.colorspaces:
+                self.output_choices = self.colorspaces[:]
+
+            # Sort output choices so standard Output transforms (Output - Rec.709, Output - sRGB) come first
+            def _output_sort_key(name: str):
+                nl = name.lower()
+                if 'output - rec.709' in nl or 'out_rec709' in nl:
+                    return (0, name)
+                elif 'output - srgb' in nl or 'out_srgb' in nl:
+                    return (1, name)
+                elif nl.startswith('output -') or nl.startswith('out_'):
+                    return (2, name)
+                elif 'rec.709' in nl or '709' in nl:
+                    return (3, name)
+                elif 'srgb' in nl:
+                    return (4, name)
+                else:
+                    return (5, name)
+
+            self.output_choices.sort(key=_output_sort_key)
+
+            # Choose standard default inputs and outputs
+            self.input_cs = None
+            for cand in ["ACES - ACEScg", "acescg", "ACEScg", "Linear", "linear"]:
+                if cand in self.input_choices:
+                    self.input_cs = cand
+                    break
+            if not self.input_cs and self.input_choices:
+                self.input_cs = self.input_choices[0]
+
+            # Output defaults to Output - Rec.709
+            self.output_cs = None
+            rec709_candidates = [
+                "Output - Rec.709",
+                "out_rec709",
+                "Rec.709",
+                "rec709",
+                "Utility - Rec.709 - Display",
+                "Output - sRGB",
+            ]
+            for cand in rec709_candidates:
+                if cand in self.output_choices:
+                    self.output_cs = cand
+                    break
+            if not self.output_cs:
+                for name in self.output_choices:
+                    nl = name.lower()
+                    if 'output' in nl and '709' in nl:
+                        self.output_cs = name
+                        break
+            if not self.output_cs and self.output_choices:
+                self.output_cs = self.output_choices[0]
+
             self.rebuild_processor()
         except Exception:
             pass

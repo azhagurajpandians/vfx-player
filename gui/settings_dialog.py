@@ -204,8 +204,16 @@ class SettingsDialog(QtWidgets.QDialog):
         self.prefs['show_cached_timeline'] = self.show_cached_chk.isChecked()
         # Map back to string value
         strat_opts = ['performance', 'progressive', 'stream', 'readbehind']
-        self.prefs['playback_strategy'] = strat_opts[self.strategy_combo.currentIndex()]
-        self.prefs['ocio_config'] = self.ocio_path_edit.text().strip()
+        cfg_val = self.ocio_path_edit.text().strip()
+        if cfg_val and os.path.isabs(cfg_val):
+            here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            try:
+                rel = os.path.relpath(cfg_val, here)
+                if not rel.startswith('..'):
+                    cfg_val = rel.replace('\\', '/')
+            except Exception:
+                pass
+        self.prefs['ocio_config'] = cfg_val
         
         if 'defaults' not in self.prefs:
             self.prefs['defaults'] = {}

@@ -1,6 +1,6 @@
 """Enhanced PyQt6 main window for VFXPlayer with compare & advanced controls."""
 
-import sys, os, json, ctypes
+import sys, os, json, ctypes, time
 import numpy as np
 from typing import Optional, Tuple, List, Dict, Any
 from PyQt6 import QtWidgets, QtGui, QtCore
@@ -23,6 +23,8 @@ from gui.playlist_widget import PlaylistWidget
 from gui.kitsu_dialog import KitsuConnectDialog, KitsuPublishDialog
 from gui.color_wheels_widget import ColorWheelWidget, ColorGradingPanel
 from gui.version_dialog import VersionCompareDialog
+from gui.about_dialog import AboutDialog
+from gui.shortcuts_dialog import ShortcutsDialog
 
 def set_dark_title_bar(hwnd):
     if sys.platform == 'win32':
@@ -643,6 +645,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # Comparison state
         self.wipe_mode = False
         self.side_by_side = False
+        self.grid_mode = 'single'
+        self.show_slot_badges = True
         self.fullscreen = False
         self.properties_visible = False
         self.compare_offset = 0
@@ -671,6 +675,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.playlist_service = PlaylistService()
         self._current_kitsu_shot: Optional[PlaylistItem] = None
+        self._current_kitsu_versions: List[Dict[str, Any]] = []
+        self._current_kitsu_tasks: List[str] = []
+        self._active_kitsu_task: Optional[str] = None
+        self._active_kitsu_version_num: Optional[int] = None
+        self._syncing_task_ui: bool = False
+        self._switching_kitsu_version: bool = False
+        self._custom_playlist_active: bool = False
 
         # Main Split / Side layout container
         self.main_split_container = QtWidgets.QWidget()
@@ -690,6 +701,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.playlist_widget.add_media_requested.connect(self._on_playlist_add_files)
         self.playlist_widget.add_folder_requested.connect(self._on_playlist_add_folder)
         self.playlist_widget.files_dropped.connect(self.add_media_paths_to_playlist)
+        self.playlist_widget.send_to_slot_requested.connect(self._on_playlist_send_to_slot)
         self.main_split_layout.addWidget(self.playlist_widget)
 
         # Global Window Shortcuts for PageUp / PageDown playlist navigation
@@ -739,6 +751,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.prefs = {}
         self._load_prefs()
         ocio_config = self.prefs.get('ocio_config')
+        if ocio_config:
+            if not os.path.isabs(ocio_config):
+                resolved = os.path.normpath(os.path.join(_APP_ROOT, ocio_config))
+                if os.path.isfile(resolved):
+                    ocio_config = resolved
+            elif not os.path.isfile(ocio_config):
+                rel_cand = os.path.normpath(os.path.join(_APP_ROOT, "configs", "ocio", "config.ocio"))
+                if os.path.isfile(rel_cand):
+                    ocio_config = rel_cand
+                else:
+                    ocio_config = None
 
         # Initialize OCIO
         try:
@@ -763,7 +786,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.prefs = {}
         self._load_prefs()
         # Apply prefs to manager
-        self.color_manager.ocio_enabled = getattr(self, '_prefs_ocio_enabled', True)
+        self.color_manager.ocio_enabled = getattr(self, '_prefs_ocio_enabled', False)
         self.color_manager.input_cs = getattr(self, '_prefs_input_cs', self.color_manager.input_cs)
         self.color_manager.output_cs = getattr(self, '_prefs_output_cs', self.color_manager.output_cs)
         self.color_manager.rebuild_processor()
@@ -798,6 +821,7 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         self.timer.timeout.connect(self._advance_frame)
         self.playing = False
+        self.play_direction = 1
         self.current_index = 0
         self.loop = True
         self.playback_speed = 1.0
@@ -826,6 +850,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._audio_output = None
         self._audio_muted = False
         self._audio_volume = 1.0
+        self._has_audio = False
+        self._audio_seek_grace_until = 0.0
         try:
             self._audio_player = QMediaPlayer(self)
             self._audio_output = QAudioOutput(self)
@@ -1255,6 +1281,107 @@ class MainWindow(QtWidgets.QMainWindow):
         """)
         self.btn_false_color.clicked.connect(lambda: self._toggle_false_color(self.btn_false_color.isChecked()))
         controls_layout.addWidget(self.btn_false_color)
+
+        # Task & Version Selector Pill (Kitsu / Shot Versions & Tasks Switcher)
+        self.task_version_pill = QtWidgets.QWidget()
+        self.task_version_pill.setStyleSheet("""
+            QWidget {
+                background-color: #1e1e22;
+                border: 1px solid #2c2c30;
+                border-radius: 6px;
+            }
+        """)
+        tv_layout = QtWidgets.QHBoxLayout(self.task_version_pill)
+        tv_layout.setContentsMargins(5, 2, 5, 2)
+        tv_layout.setSpacing(4)
+
+        lbl_task_icon = QtWidgets.QLabel("🗂")
+        lbl_task_icon.setStyleSheet("border: none; background: transparent; font-size: 11px;")
+
+        self.combo_task = QtWidgets.QComboBox()
+        self.combo_task.setToolTip("Active Pipeline Task (Edit, Lighting, Compositing...) [Ctrl+Alt+Left/Right]")
+        self.combo_task.setStyleSheet("""
+            QComboBox {
+                background-color: #141416;
+                color: #38bdf8;
+                border: 1px solid #38383c;
+                border-radius: 4px;
+                padding: 2px 6px;
+                font-size: 11px;
+                font-weight: 600;
+                min-width: 68px;
+            }
+            QComboBox:hover { border-color: #0a84ff; }
+            QComboBox::drop-down { border: none; width: 14px; }
+            QComboBox QAbstractItemView {
+                background-color: #1a1a1e;
+                color: #f5f5f7;
+                selection-background-color: #0a84ff;
+                selection-color: #ffffff;
+                border: 1px solid #38383c;
+            }
+        """)
+        self.combo_task.currentTextChanged.connect(self._on_task_combo_changed)
+
+        self.combo_version = QtWidgets.QComboBox()
+        self.combo_version.setToolTip("Active Version for selected task [Ctrl+Up/Down]")
+        self.combo_version.setStyleSheet("""
+            QComboBox {
+                background-color: #141416;
+                color: #30d158;
+                border: 1px solid #38383c;
+                border-radius: 4px;
+                padding: 2px 6px;
+                font-size: 11px;
+                font-weight: 600;
+                min-width: 68px;
+            }
+            QComboBox:hover { border-color: #30d158; }
+            QComboBox::drop-down { border: none; width: 14px; }
+            QComboBox QAbstractItemView {
+                background-color: #1a1a1e;
+                color: #f5f5f7;
+                selection-background-color: #16a34a;
+                selection-color: #ffffff;
+                border: 1px solid #38383c;
+            }
+        """)
+        self.combo_version.currentIndexChanged.connect(self._on_version_combo_changed)
+
+        self.combo_task.setFixedHeight(24)
+        self.combo_version.setFixedHeight(24)
+
+        self.btn_quick_compare = QtWidgets.QPushButton("⇄ Wipe")
+        self.btn_quick_compare.setFixedHeight(24)
+        self.btn_quick_compare.setMinimumWidth(62)
+        self.btn_quick_compare.setToolTip("Compare with Previous Version in Wipe Mode [Ctrl+Alt+C]")
+        self.btn_quick_compare.setStyleSheet("""
+            QPushButton {
+                background-color: #141416;
+                color: #e4e4e7;
+                border: 1px solid #38383c;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 1px 8px;
+            }
+            QPushButton:hover {
+                background-color: #0284c7;
+                color: #ffffff;
+                border-color: #38bdf8;
+            }
+            QPushButton:pressed {
+                background-color: #0369a1;
+            }
+        """)
+        self.btn_quick_compare.clicked.connect(lambda: self._version_compare_prev())
+
+        tv_layout.addWidget(lbl_task_icon)
+        tv_layout.addWidget(self.combo_task)
+        tv_layout.addWidget(self.combo_version)
+        tv_layout.addWidget(self.btn_quick_compare)
+
+        controls_layout.addWidget(self.task_version_pill)
 
         controls_layout.addStretch(1) # Right spacer
 
@@ -2019,6 +2146,19 @@ class MainWindow(QtWidgets.QMainWindow):
         load_slots_menu.addAction("Load into Slot 5...").triggered.connect(lambda: self._load_media_slot(4))
         load_slots_menu.addAction("Load into Slot 6...").triggered.connect(lambda: self._load_media_slot(5))
 
+        layout_menu.addSeparator()
+
+        self.show_slot_badges_action = QtGui.QAction("Show Slot Badges in Grid", self)
+        self.show_slot_badges_action.setCheckable(True)
+        self.show_slot_badges_action.setChecked(getattr(self, 'show_slot_badges', True))
+        self.show_slot_badges_action.setShortcuts([
+            QtGui.QKeySequence("Ctrl+Alt+B"),
+            QtGui.QKeySequence("Alt+B"),
+        ])
+        self.show_slot_badges_action.setToolTip("Toggle slot name badges in 2-up, 4-up, and 6-up layouts (Ctrl+Alt+B or Alt+B)")
+        self.show_slot_badges_action.triggered.connect(self._toggle_slot_badges)
+        layout_menu.addAction(self.show_slot_badges_action)
+
         # Annotate Menu
         annotate_menu = self.menuBar().addMenu("Annotate")
 
@@ -2105,14 +2245,26 @@ class MainWindow(QtWidgets.QMainWindow):
         # Playback Menu
         play_menu = self.menuBar().addMenu("Playback")
 
-        play_action = QtGui.QAction("Play/Pause", self)
+        play_action = QtGui.QAction("Play / Pause (Forward)", self)
         play_action.setShortcut("Space")
-        play_action.triggered.connect(lambda: self.pause() if self.playing else self.play())
+        play_action.triggered.connect(lambda: self.pause() if (self.playing and getattr(self, 'play_direction', 1) == 1) else self.play(direction=1))
         play_menu.addAction(play_action)
+
+        play_rev_action = QtGui.QAction("Play Reverse", self)
+        play_rev_action.setShortcut("Shift+Space")
+        play_rev_action.setToolTip("Play backwards in reverse (Shift+Space / J)")
+        play_rev_action.triggered.connect(self.play_reverse)
+        play_menu.addAction(play_rev_action)
 
         stop_action = QtGui.QAction("Stop", self)
         stop_action.triggered.connect(self.stop)
         play_menu.addAction(stop_action)
+
+        refresh_cache_action = QtGui.QAction("Refresh Timeline Cache", self)
+        refresh_cache_action.setShortcut("C")
+        refresh_cache_action.setToolTip("Flush and reload timeline frame cache (C)")
+        refresh_cache_action.triggered.connect(self.refresh_timeline_cache)
+        play_menu.addAction(refresh_cache_action)
 
         play_menu.addSeparator()
 
@@ -2156,6 +2308,13 @@ class MainWindow(QtWidgets.QMainWindow):
         clear_bms_action.triggered.connect(self._clear_all_bookmarks)
         play_menu.addAction(clear_bms_action)
 
+        play_menu.addSeparator()
+
+        act_pan_info = QtGui.QAction("Pan Viewport (Middle Click Scrubs)", self)
+        act_pan_info.setToolTip("Left-click drag pans the viewport. Middle-click drag scrubs the timeline (DJV style).")
+        act_pan_info.triggered.connect(lambda: self.statusBar().showMessage("Left-click drag: Pan viewport | Middle-click drag: Scrub timeline", 4000))
+        play_menu.addAction(act_pan_info)
+
         # Versions Menu
         versions_menu = self.menuBar().addMenu("Versions")
 
@@ -2179,10 +2338,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
         versions_menu.addSeparator()
 
+        next_task_act = QtGui.QAction("Next Task (Edit → Lighting → Comp...)", self)
+        next_task_act.setShortcut("Ctrl+Alt+Right")
+        next_task_act.setToolTip("Cycle forward to next pipeline task render (Ctrl+Alt+Right)")
+        next_task_act.triggered.connect(self._task_next)
+        versions_menu.addAction(next_task_act)
+
+        prev_task_act = QtGui.QAction("Previous Task (Comp → Lighting → Edit...)", self)
+        prev_task_act.setShortcut("Ctrl+Alt+Left")
+        prev_task_act.setToolTip("Cycle backward to previous pipeline task render (Ctrl+Alt+Left)")
+        prev_task_act.triggered.connect(self._task_prev)
+        versions_menu.addAction(prev_task_act)
+
+        versions_menu.addSeparator()
+
         compare_ver_act = QtGui.QAction("Compare with Previous Version (Wipe)", self)
         compare_ver_act.setShortcut("Ctrl+Alt+C")
         compare_ver_act.setToolTip("Load previous version into B track and enable Wipe (Ctrl+Alt+C)")
-        compare_ver_act.triggered.connect(self._version_compare_prev)
+        compare_ver_act.triggered.connect(lambda: self._version_compare_prev())
         versions_menu.addAction(compare_ver_act)
 
         versions_tasks_act = QtGui.QAction("Versions & Tasks for this Shot...", self)
@@ -2190,6 +2363,9 @@ class MainWindow(QtWidgets.QMainWindow):
         versions_tasks_act.setToolTip("Inspect and compare all task versions (Edit, Comp, Lighting, Anim) in Wipe or Side-by-Side (Ctrl+Alt+V)")
         versions_tasks_act.triggered.connect(lambda: self._show_version_compare_dialog())
         versions_menu.addAction(versions_tasks_act)
+
+        versions_menu.addSeparator()
+        self.switch_task_ver_menu = versions_menu.addMenu("Switch Task / Version")
 
         # Studio Menu (Kitsu & Multi-Shot Review)
         studio_menu = self.menuBar().addMenu("Studio")
@@ -2238,10 +2414,36 @@ class MainWindow(QtWidgets.QMainWindow):
         kitsu_clear_now_act.triggered.connect(self._on_clear_kitsu_cache_now)
         studio_menu.addAction(kitsu_clear_now_act)
 
+        # Help Menu (Nuke style)
+        help_menu = self.menuBar().addMenu("Help")
+
+        shortcuts_action = QtGui.QAction("Keyboard Shortcuts...", self)
+        shortcuts_action.setShortcut("F1")
+        shortcuts_action.setToolTip("View full keyboard shortcuts & hotkey reference guide (F1)")
+        shortcuts_action.triggered.connect(self._show_shortcuts_dialog)
+        help_menu.addAction(shortcuts_action)
+
+        docs_action = QtGui.QAction("Documentation / README...", self)
+        docs_action.setToolTip("Open documentation & user guide")
+        docs_action.triggered.connect(self._open_docs)
+        help_menu.addAction(docs_action)
+
+        github_action = QtGui.QAction("Visit GitHub Repository...", self)
+        github_action.setToolTip("Open GitHub repository in browser")
+        github_action.triggered.connect(self._open_github_repo)
+        help_menu.addAction(github_action)
+
+        help_menu.addSeparator()
+
+        about_action = QtGui.QAction("About VFX Review Player...", self)
+        about_action.setToolTip("About VFX Review Player version, author, and credits")
+        about_action.triggered.connect(self._show_about_dialog)
+        help_menu.addAction(about_action)
+
         # Add OCIO controls + Viewer Dropdown to Menu Bar (Corner Widget)
         if self.color_manager.config:
             # OCIO toggle button
-            self.ocio_btn = QtWidgets.QPushButton("OCIO")
+            self.ocio_btn = QtWidgets.QPushButton("OCIO On" if self.color_manager.ocio_enabled else "OCIO Off")
             self.ocio_btn.setObjectName("OCIOToggleBtn")
             self.ocio_btn.setCheckable(True)
             self.ocio_btn.setChecked(self.color_manager.ocio_enabled)
@@ -2318,9 +2520,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if path:
             try:
                 os.environ['OCIO'] = path
-                self.color_manager = ColorManager() # Reload
+                self.color_manager = ColorManager(config_path=path) # Reload
                 self._update_ocio_ui()
                 self._show_frame(self.current_index)
+                cfg_val = path
+                try:
+                    rel = os.path.relpath(path, _APP_ROOT)
+                    if not rel.startswith('..'):
+                        cfg_val = rel.replace('\\', '/')
+                except Exception:
+                    pass
+                self.prefs['ocio_config'] = cfg_val
+                self._save_prefs()
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Error", f"Failed to load config: {e}")
 
@@ -2908,48 +3119,362 @@ class MainWindow(QtWidgets.QMainWindow):
             self._status_base = f"Loaded: {self.version_group.current_path} [v{cur_v:03d} of {total_v}]"
             self._update_status(self._status_base)
 
-    def _version_up(self):
-        """Switch to next detected version."""
-        if not self.version_group:
-            self._update_status("No version group detected")
+    def _sync_versions_and_tasks(self, path: Optional[str] = None):
+        """
+        Synchronize both local disk version groups and Kitsu tasks & versions.
+        Updates the HUD Task/Version selector and the Versions menu.
+        """
+        if getattr(self, '_syncing_task_ui', False):
             return
-        nxt = self.version_group.get_next_version()
-        if nxt:
-            self.load_media(nxt.file_path)
-            self._update_status(f"Switched to version: {nxt.version_string}")
+        self._syncing_task_ui = True
+        try:
+            target_path = path or (self.core.media.path if self.core.media else "")
+            target_item = getattr(self, '_current_kitsu_shot', None)
+            shot_name = (target_item.shot_name if target_item else None) or (os.path.basename(self.core.media.path) if self.core.media and self.core.media.path else "")
+
+            # 1. Local disk version detection
+            if target_path and os.path.exists(target_path):
+                try:
+                    self.version_group = VersionDetector.find_versions(target_path)
+                    self._update_version_ui()
+                except Exception:
+                    self.version_group = None
+            else:
+                self.version_group = None
+
+            # 2. Kitsu tasks & versions query
+            self._current_kitsu_versions = []
+            self._current_kitsu_tasks = []
+
+            shot_id = getattr(target_item, 'kitsu_shot_id', None) if target_item else None
+            if not shot_id and shot_name and kitsu_client.is_authenticated():
+                try:
+                    s_data = kitsu_client.get_shot_by_name(shot_name)
+                    if s_data and s_data.get("id"):
+                        shot_id = s_data["id"]
+                        if target_item:
+                            target_item.kitsu_shot_id = shot_id
+                except Exception:
+                    pass
+
+            if shot_id and kitsu_client.is_authenticated():
+                try:
+                    k_vers = kitsu_client.get_shot_versions_and_tasks(shot_id)
+                    if k_vers:
+                        self._current_kitsu_versions = k_vers
+                        seen = set()
+                        for v in k_vers:
+                            t = v.get("task_name", "")
+                            if t and t not in seen:
+                                seen.add(t)
+                                self._current_kitsu_tasks.append(t)
+                except Exception as e:
+                    print(f"[Kitsu] Failed to query shot versions: {e}")
+
+            # 3. Update HUD controls
+            if hasattr(self, 'combo_task') and hasattr(self, 'combo_version'):
+                self.combo_task.blockSignals(True)
+                self.combo_version.blockSignals(True)
+                self.combo_task.clear()
+                self.combo_version.clear()
+
+                if self._current_kitsu_tasks:
+                    for t in self._current_kitsu_tasks:
+                        self.combo_task.addItem(t)
+
+                    cur_task = getattr(target_item, 'task_name', None) or getattr(target_item, 'task', None)
+                    if not cur_task or cur_task not in self._current_kitsu_tasks:
+                        cur_task = self._current_kitsu_tasks[0]
+                    self._active_kitsu_task = cur_task
+
+                    idx = self.combo_task.findText(cur_task)
+                    if idx >= 0:
+                        self.combo_task.setCurrentIndex(idx)
+
+                    self._populate_version_combo_for_task(cur_task)
+                    self.task_version_pill.show()
+                elif self.version_group and self.version_group.versions:
+                    self.combo_task.addItem("Local")
+                    self._active_kitsu_task = "Local"
+                    for vi in self.version_group.versions:
+                        lbl = f"{vi.version_string}" + (" (Latest)" if vi.version_number == self.version_group.latest_version.version_number else "")
+                        self.combo_version.addItem(lbl, vi.file_path)
+                    cur_idx = max(0, self.version_group.current_version - 1)
+                    if cur_idx < self.combo_version.count():
+                        self.combo_version.setCurrentIndex(cur_idx)
+                    self.task_version_pill.show()
+                else:
+                    self.combo_task.addItem("No Tasks")
+                    self.combo_version.addItem("v001")
+                    self.task_version_pill.show()
+
+                self.combo_task.blockSignals(False)
+                self.combo_version.blockSignals(False)
+
+            # 4. Update MenuBar dynamic submenu
+            self._update_task_version_menu()
+
+        finally:
+            self._syncing_task_ui = False
+
+    def _populate_version_combo_for_task(self, task_name: str):
+        """Fill combo_version with versions belonging to task_name and select the current one."""
+        if not hasattr(self, 'combo_version'):
+            return
+        self.combo_version.blockSignals(True)
+        self.combo_version.clear()
+
+        task_vers = [v for v in self._current_kitsu_versions if v.get("task_name") == task_name]
+        cur_p_id = getattr(getattr(self, '_current_kitsu_shot', None), 'kitsu_preview_id', None)
+
+        selected_idx = -1
+        for idx, v in enumerate(task_vers):
+            self.combo_version.addItem(v.get("version_label", f"v{v.get('version_num', 1):03d}"), v)
+            if cur_p_id and v.get("preview_file_id") == cur_p_id:
+                selected_idx = idx
+
+        if selected_idx == -1 and task_vers:
+            selected_idx = len(task_vers) - 1
+
+        if 0 <= selected_idx < self.combo_version.count():
+            self.combo_version.setCurrentIndex(selected_idx)
+            v_data = self.combo_version.itemData(selected_idx)
+            if isinstance(v_data, dict):
+                self._active_kitsu_version_num = v_data.get("version_num")
+
+        self.combo_version.blockSignals(False)
+
+    def _on_task_combo_changed(self, task_name: str):
+        """User changed task dropdown in HUD."""
+        if getattr(self, '_syncing_task_ui', False) or not task_name or task_name in ("No Tasks", "Local"):
+            return
+        self._active_kitsu_task = task_name
+        self._populate_version_combo_for_task(task_name)
+        v_data = self.combo_version.currentData()
+        if v_data and isinstance(v_data, dict) and v_data.get("preview_file_id"):
+            self._load_kitsu_version(v_data)
+
+    def _on_version_combo_changed(self, idx: int):
+        """User changed version dropdown in HUD."""
+        if getattr(self, '_syncing_task_ui', False) or idx < 0:
+            return
+        v_data = self.combo_version.itemData(idx)
+        if isinstance(v_data, str) and os.path.exists(v_data):
+            self.load_media(v_data)
+        elif isinstance(v_data, dict) and v_data.get("preview_file_id"):
+            self._load_kitsu_version(v_data)
+
+    def _update_task_version_menu(self):
+        """Update the 'Switch Task / Version' dynamic menu."""
+        if not hasattr(self, 'switch_task_ver_menu'):
+            return
+        self.switch_task_ver_menu.clear()
+
+        if self._current_kitsu_tasks and self._current_kitsu_versions:
+            for t_name in self._current_kitsu_tasks:
+                sub_menu = self.switch_task_ver_menu.addMenu(f"Task: {t_name}")
+                t_vers = [v for v in self._current_kitsu_versions if v.get("task_name") == t_name]
+                for v in t_vers:
+                    v_label = v.get("version_label", f"v{v.get('version_num', 1):03d}")
+                    is_cur = (t_name == self._active_kitsu_task and v.get("version_num") == self._active_kitsu_version_num)
+                    act_text = f"✓ {v_label}" if is_cur else v_label
+                    act = sub_menu.addAction(act_text)
+                    if v.get("preview_file_id"):
+                        act.triggered.connect(lambda checked=False, vd=v: self._load_kitsu_version(vd))
+                    else:
+                        act.setEnabled(False)
+        elif self.version_group and self.version_group.versions:
+            for vi in self.version_group.versions:
+                is_cur = (vi.version_number == self.version_group.current_version)
+                act_text = f"✓ {vi.version_string}" if is_cur else vi.version_string
+                act = self.switch_task_ver_menu.addAction(act_text)
+                act.triggered.connect(lambda checked=False, fp=vi.file_path: self.load_media(fp))
         else:
-            self._update_status("Already at latest version")
+            act = self.switch_task_ver_menu.addAction("No additional versions available")
+            act.setEnabled(False)
+
+    def _load_kitsu_version(self, v_data: Dict[str, Any], into_track_b: bool = False, compare_mode: Optional[str] = None):
+        """Download (or use cached) Kitsu preview media and load into Track A or Track B."""
+        if not v_data:
+            return
+        p_id = v_data.get("preview_file_id")
+        m_path = v_data.get("media_path")
+        label = v_data.get("version_label", "Selected Version")
+
+        load_path = None
+        if p_id:
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+            self.statusBar().showMessage(f"Downloading {label} from Kitsu...", 5000)
+            try:
+                load_path = kitsu_client.download_preview_file(preview_file_id=p_id)
+            finally:
+                QtWidgets.QApplication.restoreOverrideCursor()
+        elif m_path and os.path.exists(m_path):
+            load_path = m_path
+
+        if not load_path or not os.path.exists(load_path):
+            QtWidgets.QMessageBox.warning(self, "Load Error", f"Could not load media file for {label}.")
+            return
+
+        if into_track_b:
+            self.core_b.load(load_path)
+            self.compare_loaded = True
+            mode = compare_mode or "wipe"
+            self._set_compare_mode(mode)
+            self._update_status(f"Comparing with {label} ({mode.upper()} mode)")
+        else:
+            self._active_kitsu_task = v_data.get("task_name")
+            self._active_kitsu_version_num = v_data.get("version_num")
+            orig_shot = getattr(self, '_current_kitsu_shot', None)
+            if orig_shot:
+                orig_shot.kitsu_preview_id = p_id
+                orig_shot.task_name = v_data.get("task_name", "")
+                orig_shot.version = f"v{v_data.get('version_num', 1):03d}"
+                orig_shot.preview_cache_path = load_path
+                # Only update media_path if shot didn't have one or was a remote URL
+                if not orig_shot.media_path or orig_shot.media_path.startswith("http") or "vfxplayer_kitsu_cache" in orig_shot.media_path:
+                    orig_shot.media_path = load_path
+
+            self._switching_kitsu_version = True
+            self._loading_from_playlist = True
+            try:
+                self.load_media(load_path)
+            finally:
+                self._switching_kitsu_version = False
+                self._loading_from_playlist = False
+
+            if orig_shot:
+                self._current_kitsu_shot = orig_shot
+
+            if hasattr(self, 'playlist_widget'):
+                self.playlist_widget.refresh()
+                if hasattr(self, 'playlist_service'):
+                    self.playlist_widget.set_current_index(self.playlist_service.current_index)
+
+            shot_label = getattr(orig_shot, 'shot_name', None) or getattr(orig_shot, 'name', None)
+            if shot_label:
+                t_name = v_data.get("task_name", "")
+                v_lbl = v_data.get("version_label", f"v{v_data.get('version_num', 1):03d}")
+                self.setWindowTitle(f"VFX Player — {shot_label} [{t_name} {v_lbl}]")
+
+            self._update_status(f"Loaded {label}")
+
+    def _task_next(self):
+        """Switch to next task in pipeline (e.g. Edit -> Lighting -> Compositing)."""
+        if not self._current_kitsu_tasks or len(self._current_kitsu_tasks) <= 1:
+            self._update_status("No other tasks available for this shot")
+            return
+        cur_task = self._active_kitsu_task or self._current_kitsu_tasks[0]
+        try:
+            cur_idx = self._current_kitsu_tasks.index(cur_task)
+            nxt_idx = (cur_idx + 1) % len(self._current_kitsu_tasks)
+        except ValueError:
+            nxt_idx = 0
+        nxt_task = self._current_kitsu_tasks[nxt_idx]
+        self.combo_task.setCurrentText(nxt_task)
+        self._update_status(f"Switched task to: {nxt_task}")
+
+    def _task_prev(self):
+        """Switch to previous task in pipeline (e.g. Compositing -> Lighting -> Edit)."""
+        if not self._current_kitsu_tasks or len(self._current_kitsu_tasks) <= 1:
+            self._update_status("No other tasks available for this shot")
+            return
+        cur_task = self._active_kitsu_task or self._current_kitsu_tasks[0]
+        try:
+            cur_idx = self._current_kitsu_tasks.index(cur_task)
+            prv_idx = (cur_idx - 1) % len(self._current_kitsu_tasks)
+        except ValueError:
+            prv_idx = 0
+        prv_task = self._current_kitsu_tasks[prv_idx]
+        self.combo_task.setCurrentText(prv_task)
+        self._update_status(f"Switched task to: {prv_task}")
+
+    def _version_up(self):
+        """Switch to next detected version (supports both local disk and Kitsu tasks)."""
+        if self.version_group:
+            nxt = self.version_group.get_next_version()
+            if nxt:
+                self.load_media(nxt.file_path)
+                self._update_status(f"Switched to version: {nxt.version_string}")
+            else:
+                self._update_status("Already at latest version")
+            return
+
+        if self._current_kitsu_versions:
+            task_name = self._active_kitsu_task or (self._current_kitsu_tasks[0] if self._current_kitsu_tasks else "")
+            task_vers = [v for v in self._current_kitsu_versions if (not task_name or v.get("task_name") == task_name) and v.get("preview_file_id")]
+            cur_v_num = self._active_kitsu_version_num or 1
+            nxt_vers = [v for v in task_vers if v.get("version_num", 0) > cur_v_num]
+            if nxt_vers:
+                nxt_v = min(nxt_vers, key=lambda v: v.get("version_num", 9999))
+                self._load_kitsu_version(nxt_v)
+                self._update_status(f"Switched to version: {nxt_v.get('version_label')}")
+            else:
+                self._update_status(f"Already at latest version for {task_name or 'current task'}")
+            return
+
+        self._update_status("No version group detected")
 
     def _version_down(self):
-        """Switch to previous detected version."""
-        if not self.version_group:
-            self._update_status("No version group detected")
+        """Switch to previous detected version (supports both local disk and Kitsu tasks)."""
+        if self.version_group:
+            prv = self.version_group.get_prev_version()
+            if prv:
+                self.load_media(prv.file_path)
+                self._update_status(f"Switched to version: {prv.version_string}")
+            else:
+                self._update_status("Already at earliest version")
             return
-        prv = self.version_group.get_prev_version()
-        if prv:
-            self.load_media(prv.file_path)
-            self._update_status(f"Switched to version: {prv.version_string}")
-        else:
-            self._update_status("Already at earliest version")
+
+        if self._current_kitsu_versions:
+            task_name = self._active_kitsu_task or (self._current_kitsu_tasks[0] if self._current_kitsu_tasks else "")
+            task_vers = [v for v in self._current_kitsu_versions if (not task_name or v.get("task_name") == task_name) and v.get("preview_file_id")]
+            cur_v_num = self._active_kitsu_version_num or (len(task_vers) if task_vers else 1)
+            prv_vers = [v for v in task_vers if v.get("version_num", 0) < cur_v_num]
+            if prv_vers:
+                prv_v = max(prv_vers, key=lambda v: v.get("version_num", 0))
+                self._load_kitsu_version(prv_v)
+                self._update_status(f"Switched to version: {prv_v.get('version_label')}")
+            else:
+                self._update_status(f"Already at earliest version for {task_name or 'current task'}")
+            return
+
+        self._update_status("No version group detected")
 
     def _version_latest(self):
-        """Switch directly to the latest detected version."""
-        if not self.version_group:
-            self._update_status("No version group detected")
+        """Switch directly to latest version (supports both local disk and Kitsu tasks)."""
+        if self.version_group:
+            latest = self.version_group.latest_version
+            if latest and latest.file_path != self.version_group.current_path:
+                self.load_media(latest.file_path)
+                self._update_status(f"Switched to latest version: {latest.version_string}")
+            else:
+                self._update_status("Already at latest version")
             return
-        latest = self.version_group.latest_version
-        if latest and latest.file_path != self.version_group.current_path:
-            self.load_media(latest.file_path)
-            self._update_status(f"Switched to latest version: {latest.version_string}")
-        else:
-            self._update_status("Already at latest version")
+
+        if self._current_kitsu_versions:
+            task_name = self._active_kitsu_task or (self._current_kitsu_tasks[0] if self._current_kitsu_tasks else "")
+            task_vers = [v for v in self._current_kitsu_versions if (not task_name or v.get("task_name") == task_name) and v.get("preview_file_id")]
+            if task_vers:
+                latest_v = max(task_vers, key=lambda v: v.get("version_num", 0))
+                if latest_v.get("version_num") != self._active_kitsu_version_num:
+                    self._load_kitsu_version(latest_v)
+                    self._update_status(f"Switched to latest version: {latest_v.get('version_label')}")
+                else:
+                    self._update_status("Already at latest version")
+            return
+
+        self._update_status("No version group detected")
 
     def _version_compare_prev(self, item=None):
-        """Load previous version into Secondary Track (B) and activate Wipe comparison."""
+        """
+        Load previous version into Secondary Track (B) and activate Wipe comparison.
+        Seamlessly supports both local disk versions and Kitsu tasks & versions.
+        """
         target_path = None
         ver_label = "previous version"
 
-        # Check local file version detection
+        # 1. Check local file version detection first
         if item and getattr(item, 'media_path', None):
             vg = VersionDetector.find_versions(item.media_path)
             if vg:
@@ -2963,43 +3488,88 @@ class MainWindow(QtWidgets.QMainWindow):
                 target_path = prv.file_path
                 ver_label = prv.version_string
 
-        # If not found locally, check Kitsu task previews
+        # 2. If not found locally, query Kitsu versions for this shot
         if not target_path:
             k_item = item or getattr(self, '_current_kitsu_shot', None)
-            task_id = getattr(k_item, 'kitsu_task_id', None) or getattr(k_item, 'task_id', None) if k_item else None
-            if not task_id and k_item and getattr(k_item, 'kitsu_shot_id', None) and kitsu_client.is_authenticated():
-                tasks = kitsu_client.get_tasks_for_shot(k_item.kitsu_shot_id)
-                if tasks:
-                    task_id = tasks[0].get("id")
+            shot_name = getattr(k_item, 'shot_name', None) or getattr(k_item, 'shot', None) or (os.path.basename(self.core.media.path) if self.core.media and self.core.media.path else "Current Shot")
 
-            if task_id and kitsu_client.is_authenticated():
-                try:
-                    comments = kitsu_client.get_task_comments(task_id)
-                    previews = [c for c in comments if c.get('preview_file_id')]
-                    if len(previews) >= 2:
-                        prev_comment = previews[-2]
-                        pf_id = prev_comment.get('preview_file_id')
-                        target_path = kitsu_client.download_preview_file(preview_file_id=pf_id)
-                        ver_label = f"Kitsu preview ({pf_id[:6]}...)"
-                except Exception as e:
-                    print(f"Kitsu version fetch warning: {e}")
+            kitsu_vers = list(self._current_kitsu_versions)
+            if not kitsu_vers and kitsu_client.is_authenticated():
+                shot_id = getattr(k_item, 'kitsu_shot_id', None)
+                if not shot_id and shot_name:
+                    try:
+                        s_data = kitsu_client.get_shot_by_name(shot_name)
+                        if s_data:
+                            shot_id = s_data.get("id")
+                    except Exception:
+                        pass
+                if shot_id:
+                    try:
+                        kitsu_vers = kitsu_client.get_shot_versions_and_tasks(shot_id)
+                        self._current_kitsu_versions = kitsu_vers
+                    except Exception as e:
+                        print(f"[Kitsu] Version compare query warning: {e}")
+
+            if kitsu_vers:
+                valid_vers = [v for v in kitsu_vers if v.get("preview_file_id")]
+                if valid_vers:
+                    cur_p_id = getattr(k_item, 'kitsu_preview_id', None)
+                    active_task = self._active_kitsu_task or (k_item.task_name if k_item else "") or (valid_vers[0].get("task_name") if valid_vers else "")
+                    cur_v_num = self._active_kitsu_version_num
+
+                    target_v = None
+
+                    # A. Try to find earlier version in the same task
+                    task_vers = [v for v in valid_vers if v.get("task_name") == active_task]
+                    if task_vers:
+                        if cur_v_num and cur_v_num > 1:
+                            earlier = [v for v in task_vers if v.get("version_num", 0) < cur_v_num]
+                            if earlier:
+                                target_v = max(earlier, key=lambda v: v.get("version_num", 0))
+                        elif len(task_vers) >= 2:
+                            target_v = task_vers[-2]
+
+                    # B. If current task has only 1 version, compare with another task (e.g. Lighting, Edit, Plate)
+                    if not target_v:
+                        other_tasks = [v for v in valid_vers if v.get("task_name") != active_task and v.get("preview_file_id") != cur_p_id]
+                        if other_tasks:
+                            target_v = other_tasks[-1]
+
+                    # C. Fallback: pick any different preview among available
+                    if not target_v and len(valid_vers) >= 2:
+                        candidates = [v for v in valid_vers if v.get("preview_file_id") != cur_p_id]
+                        if candidates:
+                            target_v = candidates[-1]
+
+                    if target_v and target_v.get("preview_file_id"):
+                        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+                        self.statusBar().showMessage(f"Downloading {target_v.get('version_label')} for comparison...", 5000)
+                        try:
+                            target_path = kitsu_client.download_preview_file(preview_file_id=target_v["preview_file_id"])
+                            ver_label = target_v.get("version_label", "Kitsu preview")
+                        finally:
+                            QtWidgets.QApplication.restoreOverrideCursor()
 
         if not target_path or not os.path.exists(target_path):
-            QtWidgets.QMessageBox.information(self, "Versions", "No previous version or preview found for comparison.")
+            QtWidgets.QMessageBox.information(
+                self, "Versions",
+                "No previous version or comparison render was found for this shot.\n\n"
+                "Tip: Press Ctrl+Alt+V to inspect all task renders and versions available in Kitsu."
+            )
             return
 
         try:
             self.core_b.load(target_path)
             self.compare_loaded = True
             self._set_compare_mode('wipe')
-            self._update_status(f"Comparing current version with {ver_label}")
+            self._update_status(f"Comparing current version with {ver_label} (WIPE mode)")
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Compare Error", f"Could not load previous version: {e}")
 
     def _show_version_compare_dialog(self, item=None):
         """Display all versions across tasks (Edit, Comp, Lighting, Anim, etc.) for a shot."""
         target_item = item or getattr(self, '_current_kitsu_shot', None)
-        shot_name = (target_item.shot_name if target_item else None) or (self.core.media.name if self.core.media else "Current Shot")
+        shot_name = (target_item.shot_name if target_item else None) or (os.path.basename(self.core.media.path) if self.core.media and self.core.media.path else "Current Shot")
         versions: List[Dict[str, Any]] = []
 
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
@@ -3356,6 +3926,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _toggle_loop(self, checked):
         self.loop = checked
+        if self._audio_player and hasattr(self._audio_player, 'setLoops'):
+            try:
+                self._audio_player.setLoops(QMediaPlayer.Loops.Infinite if checked else 1)
+            except Exception:
+                pass
         
     def _go_to_start(self):
         self.seek(0)
@@ -3427,7 +4002,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.prefs = json.load(f)
             
             self._prefs_input_cs = self.prefs.get('ocio_input')
-            self._prefs_output_cs = self.prefs.get('ocio_output')
+            self._prefs_output_cs = self.prefs.get('ocio_output') or 'Output - Rec.709'
+            self._prefs_ocio_enabled = bool(self.prefs.get('ocio_enabled', False))
             
             # Application state from prefs
             self.exposure = float(self.prefs.get('exposure', 0.0))
@@ -3467,7 +4043,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, 'frame_slider'):
                 self.frame_slider.set_show_cached(self.prefs.get('show_cached_timeline', True))
             
-            self.cinema_mode_enabled = bool(self.prefs.get('cinema_mode_enabled', True))
+            self.cinema_mode_enabled = bool(self.prefs.get('cinema_mode_enabled', False))
+            self.show_slot_badges = bool(self.prefs.get('show_slot_badges', True))
+            if hasattr(self, 'show_slot_badges_action'):
+                self.show_slot_badges_action.setChecked(self.show_slot_badges)
 
             # Kitsu credentials & host restore
             try:
@@ -3508,7 +4087,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.prefs['show_cached_timeline'] = self.prefs.get('show_cached_timeline', True)
             self.prefs['audio_volume'] = getattr(self, '_audio_volume', 1.0)
             self.prefs['audio_muted'] = getattr(self, '_audio_muted', False)
-            self.prefs['cinema_mode_enabled'] = getattr(self, 'cinema_mode_enabled', True)
+            self.prefs['cinema_mode_enabled'] = getattr(self, 'cinema_mode_enabled', False)
+            self.prefs['show_slot_badges'] = getattr(self, 'show_slot_badges', True)
+
+            # Preserve and save portable relative OCIO config path
+            cfg_p = getattr(self.color_manager, 'config_path', None) or self.prefs.get('ocio_config', "")
+            if cfg_p and os.path.isabs(cfg_p):
+                try:
+                    rel = os.path.relpath(cfg_p, _APP_ROOT)
+                    if not rel.startswith('..'):
+                        cfg_p = rel.replace('\\', '/')
+                except Exception:
+                    pass
+            self.prefs['ocio_config'] = cfg_p or "configs/ocio/config.ocio"
 
             with open(_PREFS_PATH, 'w', encoding='utf-8') as f:
                 json.dump(self.prefs, f, indent=2)
@@ -3581,6 +4172,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.metadata_dialog.show()
         self.metadata_dialog.raise_()
         self.metadata_dialog.activateWindow()
+
+    # ---------- Help & Reference Dialogs ----------
+    def _show_shortcuts_dialog(self):
+        """Open the Nuke-style Keyboard Shortcuts & Hotkey Reference dialog."""
+        dlg = ShortcutsDialog(self)
+        dlg.exec()
+
+    def _show_about_dialog(self):
+        """Open the About VFX Review Player dialog."""
+        dlg = AboutDialog(self)
+        dlg.exec()
+
+    def _open_docs(self):
+        """Open documentation or README in default application / browser."""
+        readme_path = os.path.join(_APP_ROOT, "README.md")
+        if os.path.exists(readme_path):
+            try:
+                QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(readme_path))
+                return
+            except Exception:
+                pass
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl("https://github.com/azhagurajpandians/vfx-player#readme"))
+
+    def _open_github_repo(self):
+        """Open official GitHub repository."""
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl("https://github.com/azhagurajpandians/vfx-player"))
 
     # ---------- Core Actions ----------
     def load_media(self, path: str):
@@ -3697,8 +4314,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.core.media:
             self.props_hud.update_info(self.core.media)
 
-        # Update Kitsu shot context if not already assigned by playlist
-        if not getattr(self, '_current_kitsu_shot', None) or self._current_kitsu_shot.media_path != path:
+        # Update Kitsu shot context if not already assigned by playlist or switching versions
+        if getattr(self, '_switching_kitsu_version', False):
+            pass
+        elif not getattr(self, '_current_kitsu_shot', None) or (self._current_kitsu_shot.media_path != path and not getattr(self._current_kitsu_shot, 'kitsu_shot_id', None)):
             p_ctx = kitsu_client.parse_shot_context(path)
             self._current_kitsu_shot = PlaylistItem(
                 media_path=path,
@@ -3709,13 +4328,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 frame_count=cnt,
                 fps=self.core.media_fps() or 24.0
             )
+        elif self._current_kitsu_shot and self._current_kitsu_shot.media_path != path:
+            if not getattr(self._current_kitsu_shot, 'kitsu_shot_id', None) and "vfxplayer_kitsu_cache" not in path:
+                self._current_kitsu_shot.media_path = path
+
+        # Synchronize Tasks and Versions (Local Disk + Kitsu) - only when opening new shot, not when switching version
+        if not getattr(self, '_switching_kitsu_version', False):
+            self._sync_versions_and_tasks(path)
 
         # Keep playlist in sync: Auto-scan sibling clips in folder so PageUp/PageDown works by default
         if hasattr(self, 'playlist_service') and hasattr(self, 'playlist_widget'):
-            if getattr(self, '_custom_playlist_active', False):
+            if getattr(self, '_switching_kitsu_version', False) or getattr(self, '_loading_from_playlist', False):
+                pass
+            elif getattr(self, '_custom_playlist_active', False):
                 existing_idx = -1
                 for i, it in enumerate(self.playlist_service.items):
-                    if it.media_path == path:
+                    if it.media_path == path or getattr(it, 'preview_cache_path', None) == path:
                         existing_idx = i
                         break
                 if existing_idx >= 0:
@@ -3726,23 +4354,31 @@ class MainWindow(QtWidgets.QMainWindow):
         # Audio: attach source for video files
         self._audio_attach(path)
 
-        # Auto-play on load as requested
-        self.play()
+        # Ensure playhead starts at 0 for new media and auto-play
+        self.current_index = 0
+        self._play_start_index = 0
+        if self._elapsed_timer is not None:
+            self._elapsed_timer.restart()
+        self.seek(0)
+        self.play(force_restart=True)
 
-        # Mark media loaded and activate Cinema Mode (hide UI controls, keep video + timeline slider)
+        # Mark media loaded and apply view mode (Normal view by default)
         self._media_loaded = True
-        if getattr(self, 'cinema_mode_enabled', True):
+        if getattr(self, 'cinema_mode_enabled', False):
             self._set_frameless(True)
             self._hide_ui_controls()
+        else:
+            self._set_frameless(False)
+            self._show_ui_controls()
 
     def _auto_populate_folder_playlist(self, current_path: str):
         """
         Auto-populates the playlist with sibling videos and image sequences in the same folder,
         ensuring PageUp/PageDown works seamlessly out of the box for any opened file.
         """
-        if getattr(self, '_loading_from_playlist', False):
+        if getattr(self, '_loading_from_playlist', False) or getattr(self, '_switching_kitsu_version', False):
             for i, it in enumerate(self.playlist_service.items):
-                if it.media_path == current_path:
+                if it.media_path == current_path or getattr(it, 'preview_cache_path', None) == current_path:
                     self.playlist_widget.set_current_index(i)
                     break
             return
@@ -3755,6 +4391,15 @@ class MainWindow(QtWidgets.QMainWindow):
         from core.player_core import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, detect_image_sequence
 
         abs_path = os.path.abspath(current_path)
+
+        # Never auto-populate from Kitsu temporary cache directory
+        if "vfxplayer_kitsu_cache" in abs_path or abs_path.startswith(tempfile.gettempdir()):
+            return
+
+        # Never overwrite an active custom or Kitsu review playlist
+        if getattr(self, '_custom_playlist_active', False) or any(getattr(it, 'kitsu_shot_id', None) for it in self.playlist_service.items):
+            return
+
         folder = os.path.dirname(abs_path)
         if not os.path.isdir(folder):
             return
@@ -4091,34 +4736,99 @@ class MainWindow(QtWidgets.QMainWindow):
             self._elapsed_timer = QtCore.QElapsedTimer()
             self._elapsed_timer.start()
 
-        fps = (self.core.media_fps() or 24.0) * self.playback_speed
-        ms = self._elapsed_timer.elapsed()
-        frames = int(ms * fps / 1000.0)
-        next_idx = self._play_start_index + frames
+        base_fps = self.core.media_fps() or 24.0
+        fps = base_fps * self.playback_speed
+        direction = getattr(self, 'play_direction', 1)
 
-        # Check against Range Out
-        if next_idx > r_out:
-            if self.loop:
-                next_idx = r_in
-                self._elapsed_timer.restart()
-                self._play_start_index = r_in
-                # Loop audio if applicable
-                if self._audio_player and self._audio_player.source().isValid():
-                    pos_ms = int(r_in * 1000.0 / fps)
-                    self._audio_player.setPosition(pos_ms)
+        # Audio Master Clock:
+        # In media players, the sound card is the true reference clock. When audio is playing forward
+        # at 1.0x, video synchronizes directly to the audio position.
+        # Only activate when media actually has audio and outside of seek grace periods.
+        audio_sync_active = (
+            self._audio_player is not None
+            and getattr(self, '_has_audio', False)
+            and self._audio_player.source().isValid()
+            and self._audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            and direction > 0
+            and self.playback_speed == 1.0
+            and time.time() > getattr(self, '_audio_seek_grace_until', 0.0)
+        )
+
+        use_audio_clock = False
+        if audio_sync_active:
+            a_pos = self._audio_player.position()
+            expected_start_ms = int(self._play_start_index * 1000.0 / base_fps)
+            # Once audio has reached or passed the initial start time, lock video to audio
+            if a_pos >= max(0, expected_start_ms - 100):
+                next_idx = int(a_pos * base_fps / 1000.0)
+                use_audio_clock = True
+
+        if not use_audio_clock:
+            ms = self._elapsed_timer.elapsed()
+            frames = int(ms * fps / 1000.0)
+            if direction >= 0:
+                next_idx = self._play_start_index + frames
             else:
-                # Check if playlist has a next shot to play continuously
-                if hasattr(self, 'playlist_service') and len(self.playlist_service.items) > 1:
-                    if self.playlist_service.has_next() or self.playlist_service.loop:
-                        self._playlist_seamless_next()
-                        return  # Handled seamlessly by _playlist_seamless_next
-                next_idx = r_out
-                self.pause()
-                return  # Stop advancement
+                next_idx = self._play_start_index - frames
+
+        if direction >= 0:
+            # Check against Range Out
+            if next_idx > r_out:
+                if self.loop:
+                    next_idx = r_in
+                    self._elapsed_timer.restart()
+                    self._play_start_index = r_in
+                    # Prefetch beginning of loop immediately so looping never drops frames
+                    if hasattr(self.core, 'burst_prefetch'):
+                        self.core.burst_prefetch(r_in, count=min(48, cnt), direction=1)
+                    # Loop audio if applicable
+                    if self._audio_player and self._audio_player.source().isValid() and getattr(self, '_has_audio', False) and self.playback_speed == 1.0:
+                        pos_ms = int(r_in * 1000.0 / base_fps)
+                        self._audio_player.setPosition(pos_ms)
+                        if self._audio_player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+                            self._audio_player.play()
+                        self._audio_seek_grace_until = time.time() + 0.15
+                else:
+                    # Check if playlist has a next shot to play continuously
+                    if hasattr(self, 'playlist_service') and len(self.playlist_service.items) > 1:
+                        if self.playlist_service.has_next() or self.playlist_service.loop:
+                            self._playlist_seamless_next()
+                            return
+                    next_idx = r_out
+                    self.pause()
+                    return
+        else:
+            next_idx = self._play_start_index - frames
+            # Check against Range In
+            if next_idx < r_in:
+                if self.loop:
+                    next_idx = r_out
+                    self._elapsed_timer.restart()
+                    self._play_start_index = r_out
+                    if hasattr(self.core, 'burst_prefetch'):
+                        self.core.burst_prefetch(r_out, count=min(48, cnt), direction=-1)
+                else:
+                    # Check if playlist has a previous shot to play continuously in reverse
+                    if hasattr(self, 'playlist_service') and len(self.playlist_service.items) > 1:
+                        if self.playlist_service.has_prev() or self.playlist_service.loop:
+                            self._playlist_seamless_prev()
+                            return
+                    next_idx = r_in
+                    self.pause()
+                    return
 
         # Don't re-display the same frame
         if next_idx == self.current_index:
             return
+
+        # Ensure predictive prefetching is oriented in play_direction across all visible active cores
+        if hasattr(self.core, 'predictive_prefetch'):
+            self.core.predictive_prefetch(next_idx, direction=direction)
+        for v_idx, vp in enumerate(getattr(self, 'viewports', [])):
+            if v_idx > 0 and vp.isVisible() and v_idx < len(self.cores):
+                c = self.cores[v_idx]
+                if c.frame_count() > 0 and hasattr(c, 'predictive_prefetch'):
+                    c.predictive_prefetch(next_idx, direction=direction)
 
         # --- Drop-frame strategy (MPC-style) ---
         # If the target frame isn't ready, we DO NOT jump sideways to find another 
@@ -4128,25 +4838,26 @@ class MainWindow(QtWidgets.QMainWindow):
         if frame_raw is None:
             return
 
-        self.seek(next_idx, update_audio=False)
+        self.seek(next_idx, update_audio=False, from_advance=True)
 
 
-    def seek(self, index: int, update_audio=True):
+    def seek(self, index: int, update_audio=True, from_advance=False):
         idx = int(index)
         if 0 <= idx < self.core.frame_count():
             is_scrubbing = False
             if hasattr(self, 'frame_slider') and self.frame_slider.isSliderDown():
                 is_scrubbing = True
 
-            # Update elapsed timer and start index so playback resumes smoothly from this new frame
-            if self.playing:
+            # Update elapsed timer and start index only for manual seeks, scrubbing, or jumps
+            # (not during internal playback frame advancement, to prevent sub-millisecond clock truncation)
+            if self.playing and not from_advance:
                 if self._elapsed_timer is None:
                     self._elapsed_timer = QtCore.QElapsedTimer()
                 self._elapsed_timer.restart()
                 self._play_start_index = idx
 
             self._show_frame(idx, is_scrubbing=is_scrubbing)
-            # Sync audio position for video files
+            # Sync audio position for video files when user explicitly seeks or scrubs
             if update_audio and self._audio_player and self._audio_player.source().isValid():
                 fps = self.core.media_fps() or 24.0
                 pos_ms = int(idx * 1000.0 / fps)
@@ -4157,10 +4868,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, 'core') and self.core and self.core.media:
             self.core.predictive_prefetch(self.current_index, getattr(self.core, 'last_direction', 1))
 
-    def play(self):
-        if self.playing:
+    def play(self, direction: int = 1, force_restart: bool = False):
+        if not force_restart and self.playing and getattr(self, 'play_direction', 1) == direction:
             return
         self.playing = True
+        self.play_direction = 1 if direction >= 0 else -1
 
         # Unified elapsed-time playback for all media types
         self._elapsed_timer = QtCore.QElapsedTimer()
@@ -4170,12 +4882,31 @@ class MainWindow(QtWidgets.QMainWindow):
         # 8ms heartbeat (~125fps cap) for smooth frame sync
         self.timer.start(8)
 
-        # Aggressive prefetch burst: load next 48 frames immediately
-        self.core.burst_prefetch(self.current_index, count=48)
+        # Prefetch burst: load 48 frames in play direction for primary and visible grid cores
+        if hasattr(self.core, 'burst_prefetch'):
+            self.core.burst_prefetch(self.current_index, count=48, direction=self.play_direction)
+        for v_idx, vp in enumerate(getattr(self, 'viewports', [])):
+            if v_idx > 0 and vp.isVisible() and v_idx < len(self.cores):
+                c = self.cores[v_idx]
+                if c.frame_count() > 0 and hasattr(c, 'burst_prefetch'):
+                    c.burst_prefetch(self.current_index, count=48, direction=self.play_direction)
 
-        # Audio
-        if self._audio_player and self._audio_player.source().isValid():
-            self._audio_player.play()
+        # Audio: only forward playback at 1.0x plays audio when media actually has an audio stream
+        if self._audio_player and self._audio_player.source().isValid() and getattr(self, '_has_audio', False):
+            if hasattr(self._audio_player, 'setLoops'):
+                try:
+                    self._audio_player.setLoops(QMediaPlayer.Loops.Infinite if getattr(self, 'loop', True) else 1)
+                except Exception:
+                    pass
+            if self.play_direction == 1 and self.playback_speed == 1.0:
+                fps = self.core.media_fps() or 24.0
+                pos_ms = int(self.current_index * 1000.0 / fps)
+                self._audio_player.setPosition(pos_ms)
+                self._audio_player.play()
+            else:
+                self._audio_player.pause()
+        elif self._audio_player:
+            self._audio_player.pause()
 
         # Update UI
         if hasattr(self, 'btn_play'):
@@ -4184,8 +4915,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_play.setText("||")
             self.btn_play.blockSignals(False)
 
-        self._status_base = "Playing"
+        dir_lbl = "Reverse " if self.play_direction == -1 else ""
+        self._status_base = f"Playing {dir_lbl}({self.playback_speed}x)" if self.playback_speed != 1.0 else (f"Playing {dir_lbl}".strip())
         self._update_status(self._status_base)
+
+    def play_reverse(self):
+        """Start reverse playback or cycle reverse speed (JKL style)."""
+        if self.playing and getattr(self, 'play_direction', 1) == -1:
+            rev_speeds = [1.0, 1.5, 2.0, 4.0]
+            try:
+                idx = rev_speeds.index(self.playback_speed)
+                next_s = rev_speeds[(idx + 1) % len(rev_speeds)]
+            except ValueError:
+                next_s = 1.0
+            self._on_speed_changed(next_s)
+            return
+
+        self.playback_speed = 1.0
+        if hasattr(self, 'speed_btn'):
+            self.speed_btn.setText("1.0x")
+        self.play(direction=-1)
 
     def pause(self):
         if not self.playing:
@@ -4251,11 +5000,19 @@ class MainWindow(QtWidgets.QMainWindow):
         video_exts = {'.mov', '.mp4', '.avi', '.mkv', '.mxf', '.webm'}
         
         if ext in video_exts:
+            if hasattr(self._audio_player, 'setLoops'):
+                try:
+                    self._audio_player.setLoops(QMediaPlayer.Loops.Infinite if getattr(self, 'loop', True) else 1)
+                except Exception:
+                    pass
+            # Synchronously initialize _has_audio from media probe
+            self._has_audio = bool(getattr(getattr(self, 'core', None), 'media', None) and getattr(self.core.media, 'has_audio', False))
             self._audio_player.setSource(QUrl.fromLocalFile(os.path.abspath(path)))
             
             def _on_media_status(status):
-                if status == QMediaPlayer.MediaStatus.LoadedMedia:
+                if status in (QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia):
                     has_audio = self._audio_player.hasAudio()
+                    self._has_audio = has_audio
                     if hasattr(self, 'btn_mute'):
                         self.btn_mute.setEnabled(has_audio)
                     if hasattr(self, 'volume_slider'):
@@ -4285,6 +5042,14 @@ class MainWindow(QtWidgets.QMainWindow):
                         if self._audio_output:
                             self._audio_output.setVolume(self._audio_volume)
                             self._audio_output.setMuted(self._audio_muted)
+
+                        # If playback has already started (e.g. on initial load), start audio immediately
+                        if getattr(self, 'playing', False) and getattr(self, 'play_direction', 1) == 1 and getattr(self, 'playback_speed', 1.0) == 1.0:
+                            fps = self.core.media_fps() or 24.0
+                            pos_ms = int(getattr(self, 'current_index', 0) * 1000.0 / fps)
+                            self._audio_player.setPosition(pos_ms)
+                            if self._audio_player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+                                self._audio_player.play()
                     else:
                         if hasattr(self, 'btn_mute'):
                             self.btn_mute.setStyleSheet("QPushButton { color: #555; background: transparent; border: 1px solid #333; }")
@@ -4298,6 +5063,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._audio_player.mediaStatusChanged.connect(_on_media_status)
         else:
             # Image sequence — clear audio source
+            self._has_audio = False
             self._audio_player.setSource(QUrl())
             if hasattr(self, 'btn_mute'):
                 self.btn_mute.setEnabled(False)
@@ -4353,16 +5119,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._status_base = msg
         if hasattr(self, 'status_state_badge'):
             if self.playing:
-                self.status_state_badge.setText("● PLAYING")
-                self.status_state_badge.setStyleSheet("""
-                    background-color: rgba(48, 209, 88, 0.15);
-                    border: 1px solid rgba(48, 209, 88, 0.35);
-                    border-radius: 4px;
-                    color: #30d158;
-                    padding: 2px 7px;
-                    font-size: 11px;
-                    font-weight: 600;
-                """)
+                if getattr(self, 'play_direction', 1) == -1:
+                    self.status_state_badge.setText("◀ REVERSE")
+                    self.status_state_badge.setStyleSheet("""
+                        background-color: rgba(10, 132, 255, 0.15);
+                        border: 1px solid rgba(10, 132, 255, 0.35);
+                        border-radius: 4px;
+                        color: #0a84ff;
+                        padding: 2px 7px;
+                        font-size: 11px;
+                        font-weight: 600;
+                    """)
+                else:
+                    self.status_state_badge.setText("● PLAYING")
+                    self.status_state_badge.setStyleSheet("""
+                        background-color: rgba(48, 209, 88, 0.15);
+                        border: 1px solid rgba(48, 209, 88, 0.35);
+                        border-radius: 4px;
+                        color: #30d158;
+                        padding: 2px 7px;
+                        font-size: 11px;
+                        font-weight: 600;
+                    """)
             elif "Paused" in msg or "Stopped" in msg:
                 self.status_state_badge.setText("⏸ PAUSED")
                 self.status_state_badge.setStyleSheet("""
@@ -4419,16 +5197,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Update State badge
         if self.playing:
-            self.status_state_badge.setText("● PLAYING")
-            self.status_state_badge.setStyleSheet("""
-                background-color: rgba(48, 209, 88, 0.15);
-                border: 1px solid rgba(48, 209, 88, 0.35);
-                border-radius: 4px;
-                color: #30d158;
-                padding: 2px 7px;
-                font-size: 11px;
-                font-weight: 600;
-            """)
+            if getattr(self, 'play_direction', 1) == -1:
+                self.status_state_badge.setText("◀ REVERSE")
+                self.status_state_badge.setStyleSheet("""
+                    background-color: rgba(10, 132, 255, 0.15);
+                    border: 1px solid rgba(10, 132, 255, 0.35);
+                    border-radius: 4px;
+                    color: #0a84ff;
+                    padding: 2px 7px;
+                    font-size: 11px;
+                    font-weight: 600;
+                """)
+            else:
+                self.status_state_badge.setText("● PLAYING")
+                self.status_state_badge.setStyleSheet("""
+                    background-color: rgba(48, 209, 88, 0.15);
+                    border: 1px solid rgba(48, 209, 88, 0.35);
+                    border-radius: 4px;
+                    color: #30d158;
+                    padding: 2px 7px;
+                    font-size: 11px;
+                    font-weight: 600;
+                """)
         else:
             self.status_state_badge.setText("⏸ PAUSED")
             self.status_state_badge.setStyleSheet("""
@@ -4492,6 +5282,27 @@ class MainWindow(QtWidgets.QMainWindow):
         return frame_to_timecode(frame, fps)
 
     # ---------- Cache capacity controls ----------
+    def refresh_timeline_cache(self):
+        """Refresh / flush and reload the timeline cache immediately (Shortcut: C)."""
+        if not self.core or not self.core.media:
+            self.statusBar().showMessage("No media loaded to refresh cache", 2000)
+            return
+
+        # Clear memory frame cache and loader queues
+        self.core.clear_cache()
+
+        # Reset timeline cache indicator
+        if hasattr(self, 'frame_slider'):
+            self.frame_slider.set_cached_indices(set())
+            self.frame_slider.update()
+
+        # Force reload current frame and burst prefetch around playhead
+        self.seek(self.current_index)
+        direction = 1 if getattr(self, 'playback_direction', 1) >= 0 else -1
+        self.core.burst_prefetch(self.current_index, count=getattr(self, 'prefetch_count', 48), direction=direction)
+
+        self.statusBar().showMessage("Timeline cache refreshed (C)", 3000)
+
     def _set_cache_capacity_dialog(self):
         try:
             current = int(getattr(getattr(self.core, 'cache', None), 'capacity', 200))
@@ -4728,6 +5539,12 @@ class MainWindow(QtWidgets.QMainWindow):
         key = event.key()
         mods = event.modifiers()
 
+        # F1 — Open Keyboard Shortcuts & Hotkey Reference
+        if key == QtCore.Qt.Key.Key_F1:
+            self._show_shortcuts_dialog()
+            event.accept()
+            return
+
         # Annotation mode shortcuts: N or Alt+A
         if key == QtCore.Qt.Key.Key_N or (key == QtCore.Qt.Key.Key_A and bool(mods & QtCore.Qt.KeyboardModifier.AltModifier)):
             self._toggle_annotate_mode()
@@ -4792,8 +5609,10 @@ class MainWindow(QtWidgets.QMainWindow):
         elif key == QtCore.Qt.Key.Key_C:
             if event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier:
                 self._set_view_preset('minimal' if not self.cinema_mode_enabled else 'normal')
-            else:
-                self._set_channel('RGB')
+            elif event.modifiers() == QtCore.Qt.KeyboardModifier.NoModifier:
+                self.refresh_timeline_cache()
+            event.accept()
+            return
         elif key in (QtCore.Qt.Key.Key_Alt, QtCore.Qt.Key.Key_AltGr):
             if self.menuBar().isHidden():
                 self.menuBar().show()
@@ -4811,7 +5630,9 @@ class MainWindow(QtWidgets.QMainWindow):
         elif key == QtCore.Qt.Key.Key_G:
             self._set_channel('G')
         elif key == QtCore.Qt.Key.Key_B:
-            if mods & QtCore.Qt.KeyboardModifier.ControlModifier:
+            if (mods & QtCore.Qt.KeyboardModifier.AltModifier):
+                self._toggle_slot_badges()
+            elif mods & QtCore.Qt.KeyboardModifier.ControlModifier:
                 self._set_channel('B')
             else:
                 self._toggle_bookmark()
@@ -4880,9 +5701,10 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # --- Playback Navigation (JKL) ---
         elif key == QtCore.Qt.Key.Key_L:
-            if not self.playing:
-                self.play()
+            if not self.playing or getattr(self, 'play_direction', 1) != 1:
+                self.play_direction = 1
                 self._on_speed_changed(1.0)
+                self.play(direction=1)
             else:
                 # Cycle forward speeds
                 fwd_speeds = [1.0, 1.5, 2.0, 4.0]
@@ -4895,11 +5717,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif key == QtCore.Qt.Key.Key_K:
             self.pause()
         elif key == QtCore.Qt.Key.Key_J:
-            # For now, J acts as "Play 1x" or we could implement reverse later.
-            # Industry JKL: J is reverse, but let's stick to forward/pause for now.
-            if not self.playing:
-                self.play()
-                self._on_speed_changed(1.0) # Placeholder for reverse
+            self.play_reverse()
         
         # --- Speed Presets (Alt + 0/1/2/3) ---
         elif event.modifiers() & QtCore.Qt.KeyboardModifier.AltModifier:
@@ -5056,20 +5874,25 @@ class MainWindow(QtWidgets.QMainWindow):
         super().closeEvent(event)
 
     def _toggle_safe_guides(self, checked):
-        if hasattr(self, 'viewport') and self.viewport:
-            self.viewport.set_guides_enabled(checked)
-        if hasattr(self, 'viewport_b') and self.viewport_b:
-            self.viewport_b.set_guides_enabled(checked)
+        viewports = getattr(self, 'viewports', [getattr(self, 'viewport', None)])
+        for vp in viewports:
+            if vp:
+                vp.set_guides_enabled(checked)
+        if hasattr(self, 'guides_toggle_action'):
+            self.guides_toggle_action.blockSignals(True)
+            self.guides_toggle_action.setChecked(checked)
+            self.guides_toggle_action.blockSignals(False)
+        self.statusBar().showMessage(f"Safe Guides: {'ON' if checked else 'OFF'}", 2000)
 
     def _update_guides_config(self):
         c = self.guide_center_action.isChecked()
         t = self.guide_thirds_action.isChecked()
         a = self.guide_action_action.isChecked()
         ti = self.guide_title_action.isChecked()
-        if hasattr(self, 'viewport') and self.viewport:
-            self.viewport.set_guides_config(c, t, a, ti)
-        if hasattr(self, 'viewport_b') and self.viewport_b:
-            self.viewport_b.set_guides_config(c, t, a, ti)
+        viewports = getattr(self, 'viewports', [getattr(self, 'viewport', None)])
+        for vp in viewports:
+            if vp:
+                vp.set_guides_config(c, t, a, ti)
 
     def _get_marked_frames(self) -> list[int]:
         active_annots = {k for k, v in self.annotations.items() if v}
@@ -5328,6 +6151,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for vp in self.viewports:
             self.grid_layout.removeWidget(vp)
             vp.hide()
+            vp.set_slot_badge(False)
             
         if mode == 'single':
             self.grid_layout.addWidget(self.viewport, 0, 0)
@@ -5338,13 +6162,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.grid_layout.addWidget(self.viewport_b, 0, 1)
             self.viewport.show()
             self.viewport_b.show()
+            self.viewport.set_slot_badge(self.show_slot_badges, "Slot 1 (Left)")
+            self.viewport_b.set_slot_badge(self.show_slot_badges, "Slot 2 (Right)")
             self.side_by_side = True
         elif mode == 'grid4':
+            slot_names = ["Slot 1 (Top-Left)", "Slot 2 (Top-Right)", "Slot 3 (Bottom-Left)", "Slot 4 (Bottom-Right)"]
             for i, vp in enumerate(self.viewports[:4]):
                 row = i // 2
                 col = i % 2
                 self.grid_layout.addWidget(vp, row, col)
                 vp.show()
+                vp.set_slot_badge(self.show_slot_badges, slot_names[i])
             self.side_by_side = True
         elif mode == 'grid6':
             for i, vp in enumerate(self.viewports[:6]):
@@ -5352,11 +6180,39 @@ class MainWindow(QtWidgets.QMainWindow):
                 col = i % 3
                 self.grid_layout.addWidget(vp, row, col)
                 vp.show()
+                vp.set_slot_badge(self.show_slot_badges, f"Slot {i + 1}")
             self.side_by_side = True
                 
         # Force frame display refresh only if window is visible
         if self.isVisible():
             self._show_frame(self.current_index)
+
+    def _toggle_slot_badges(self, visible: Optional[bool] = None):
+        """Toggle slot name/index badges on viewports in grid layout."""
+        if visible is None:
+            self.show_slot_badges = not getattr(self, 'show_slot_badges', True)
+        else:
+            self.show_slot_badges = bool(visible)
+
+        if hasattr(self, 'show_slot_badges_action'):
+            self.show_slot_badges_action.blockSignals(True)
+            self.show_slot_badges_action.setChecked(self.show_slot_badges)
+            self.show_slot_badges_action.blockSignals(False)
+
+        # Update visibility on all viewports
+        for vp in getattr(self, 'viewports', []):
+            if hasattr(vp, 'slot_badge'):
+                if getattr(self, 'grid_mode', 'single') == 'single':
+                    vp.slot_badge.setVisible(False)
+                else:
+                    vp.slot_badge.setVisible(self.show_slot_badges and vp.isVisible())
+                    if self.show_slot_badges and vp.isVisible():
+                        vp.slot_badge.adjustSize()
+                        vp.slot_badge.raise_()
+
+        self._status_base = f"Slot Badges: {'Shown' if self.show_slot_badges else 'Hidden'}"
+        self._update_status(self._status_base)
+        self._save_prefs()
 
     def _load_media_slot(self, slot_idx: int):
         media_filter = (
@@ -5368,19 +6224,37 @@ class MainWindow(QtWidgets.QMainWindow):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, f"Load Slot {slot_idx + 1} Media", "", media_filter)
         if not path:
             return
-        self.load_media_into_slot(slot_idx, path)
+        self.load_media_into_slot(slot_idx, path, autoplay=True)
 
-    def load_media_into_slot(self, slot_idx: int, path: str):
+    def load_media_into_slot(self, slot_idx: int, path: str, shot_title: str = None, autoplay: bool = True):
         """
         Loads a video file or image sequence directly into a specific layout slot (0-5).
-        Enables multi-viewport drag-and-drop targeting any tile in single, 4-up, or 6-up grids.
+        Enables multi-viewport drag-and-drop targeting any tile in single, 2-up, 4-up, or 6-up grids.
         """
         if slot_idx == 0:
             self.load_media(path)
+            if autoplay and not self.playing:
+                self.play()
             return
 
         if not (0 <= slot_idx < len(self.cores)):
             return
+
+        # Auto-switch layout to reveal the slot if currently in single view
+        if getattr(self, 'grid_mode', 'single') == 'single':
+            if slot_idx == 1:
+                self._set_grid_layout('side')
+            elif slot_idx in (2, 3):
+                self._set_grid_layout('grid4')
+            elif slot_idx in (4, 5):
+                self._set_grid_layout('grid6')
+        elif getattr(self, 'grid_mode', 'single') == 'side' and slot_idx >= 2:
+            if slot_idx in (2, 3):
+                self._set_grid_layout('grid4')
+            else:
+                self._set_grid_layout('grid6')
+        elif getattr(self, 'grid_mode', 'single') == 'grid4' and slot_idx >= 4:
+            self._set_grid_layout('grid6')
 
         core = self.cores[slot_idx]
         try:
@@ -5399,15 +6273,71 @@ class MainWindow(QtWidgets.QMainWindow):
             
         if slot_idx == 1:
             self.compare_loaded = True
-            if getattr(self, 'grid_mode', 'single') == 'single' and not self.wipe_mode:
-                self._set_compare_mode('side')
 
-        # Ensure viewport is visible if in grid mode
+        # Ensure viewport is visible
         if slot_idx < len(self.viewports):
-            self.viewports[slot_idx].show()
+            vp = self.viewports[slot_idx]
+            vp.show()
+            name_display = shot_title or os.path.basename(path)
+            vp.set_slot_badge(self.show_slot_badges, f"Slot {slot_idx + 1}: {name_display}")
 
-        self.status.showMessage(f"Loaded media into Slot {slot_idx + 1}: {os.path.basename(path)}", 3000)
+        # Burst prefetch around playhead for this slot
+        direction = 1 if getattr(self, 'play_direction', 1) >= 0 else -1
+        if hasattr(core, 'burst_prefetch'):
+            core.burst_prefetch(self.current_index, count=48, direction=direction)
+
+        # Show frame
         self._show_frame(self.current_index)
+
+        # Drag-and-play: start synchronized playback if autoplay requested or already playing
+        if autoplay or self.playing:
+            self.play(direction=direction, force_restart=False)
+
+        name_display = shot_title or os.path.basename(path)
+        self.status.showMessage(f"Loaded & Playing in Slot {slot_idx + 1}: {name_display}", 3000)
+
+    def handle_shot_dropped_on_slot(self, slot_idx: int, shot_data: dict):
+        """Handle clip dropped directly onto a viewport tile from the Playlist / Shot Browser."""
+        path = shot_data.get('media_path', '')
+        preview_id = shot_data.get('kitsu_preview_id')
+        name = shot_data.get('name') or shot_data.get('shot_name') or "Shot"
+
+        # If media is not on disk yet (e.g. Kitsu preview), download/cache it
+        if not path or not os.path.exists(path):
+            if preview_id or (path and (path.startswith("http://") or path.startswith("https://"))):
+                QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+                self.statusBar().showMessage(f"Downloading preview for {name} from Kitsu...", 5000)
+                try:
+                    from core.kitsu_service import kitsu_client
+                    cached_file = kitsu_client.download_preview_file(
+                        preview_file_id=preview_id,
+                        media_url=path if path and path.startswith("http") else None
+                    )
+                    if cached_file and os.path.exists(cached_file):
+                        path = cached_file
+                except Exception as e:
+                    print(f"[Kitsu Drop] Failed to download preview: {e}")
+                finally:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+
+        if path and os.path.exists(path):
+            self.load_media_into_slot(slot_idx, path, shot_title=name, autoplay=True)
+        else:
+            QtWidgets.QMessageBox.warning(
+                self, "Media File Missing",
+                f"Could not load shot for Slot {slot_idx + 1}:\n{path or name}"
+            )
+
+    def _on_playlist_send_to_slot(self, item, slot_idx: int):
+        """Context menu callback to send a playlist shot to a specific grid slot."""
+        if not item:
+            return
+        shot_data = {
+            'media_path': getattr(item, 'media_path', ''),
+            'kitsu_preview_id': getattr(item, 'kitsu_preview_id', None),
+            'name': getattr(item, 'shot_name', '') or getattr(item, 'name', '') or "Shot"
+        }
+        self.handle_shot_dropped_on_slot(slot_idx, shot_data)
 
     def _toggle_grade_panel(self, checked=None):
         if checked is None:
@@ -6022,6 +6952,89 @@ class MainWindow(QtWidgets.QMainWindow):
         # Trigger prefetch of upcoming clips
         self._trigger_playlist_prefetch(count=2)
 
+    def _playlist_seamless_prev(self):
+        """
+        Seamlessly transition to the previous playlist item without interrupting reverse playback.
+        Eliminates the pause/halt between shots in the playlist, cutting directly like an edit timeline.
+        """
+        item = self.playlist_service.prev_item()
+        if not item:
+            self.pause()
+            return
+
+        self.playlist_widget.set_current_index(self.playlist_service.current_index)
+        self._current_kitsu_shot = item
+        path = item.media_path
+        preview_id = getattr(item, 'kitsu_preview_id', None)
+
+        if not path or not os.path.exists(path):
+            if preview_id or (path and (path.startswith("http://") or path.startswith("https://"))):
+                try:
+                    cached_file = kitsu_client.download_preview_file(
+                        preview_file_id=preview_id,
+                        media_url=path if path and path.startswith("http") else None
+                    )
+                    if cached_file and os.path.exists(cached_file):
+                        item.media_path = cached_file
+                        path = cached_file
+                except Exception as e:
+                    print(f"[Kitsu] Failed to download preview media: {e}")
+
+        if not path or not os.path.exists(path):
+            self.pause()
+            self._on_playlist_shot_selected(item)
+            return
+
+        self._loading_from_playlist = True
+        try:
+            self.core.load(path)
+        except Exception as e:
+            self.pause()
+            print(f"[Seamless Transition] Failed to load {path}: {e}")
+            return
+        finally:
+            self._loading_from_playlist = False
+
+        cnt = self.core.frame_count()
+        last_frame = max(0, cnt - 1)
+        self.current_index = last_frame
+        self.range_in = 0
+        self.range_out = last_frame
+
+        self.frame_slider.setMaximum(last_frame)
+        self.frame_slider.setValue(last_frame)
+        self._configure_frame_slider_ticks()
+        if hasattr(self, 'range_start_edit'):
+            self.range_start_edit.setText("0")
+        if hasattr(self, 'range_end_edit'):
+            self.range_end_edit.setText(str(self.range_out))
+
+        try:
+            sidecar = AnnotationService.load_sidecar(path)
+            if sidecar:
+                self.annotations = sidecar.get("annotations", {})
+                self.bookmarks = set(sidecar.get("bookmarks", []))
+            else:
+                self.annotations = {}
+                self.bookmarks = set()
+        except Exception:
+            self.annotations = {}
+            self.bookmarks = set()
+
+        self._refresh_annotation_display()
+        self._update_timeline_markers()
+
+        self._audio_attach(path)
+        if self._audio_player and self._audio_player.source().isValid():
+            self._audio_player.pause()
+
+        if self._elapsed_timer is not None:
+            self._elapsed_timer.restart()
+        self._play_start_index = last_frame
+
+        self._show_frame(last_frame)
+        self._trigger_playlist_prefetch(count=2)
+
     def playlist_next_shot(self, autoplay: bool = False):
         """Advance to the next shot in the playlist."""
         item = self.playlist_service.next_item()
@@ -6234,6 +7247,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if dlg.exec():
             items = dlg.get_selected_playlist_items()
             if items:
+                self._custom_playlist_active = True
                 self.playlist_service.clear()
                 for item in items:
                     self.playlist_service.add_item(item)

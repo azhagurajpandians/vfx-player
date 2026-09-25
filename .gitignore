@@ -33,3 +33,6 @@ scratch/
 *.egg-info/
 contact_sheet*
 *.err
+prefs.json
+*Audit_Report*.md
+*.audit.md

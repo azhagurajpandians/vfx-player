@@ -31,8 +31,16 @@ class LoginResult(dict):
 class KitsuService:
     """Zero-dependency Kitsu / Zou REST API client and VFX shot context parser."""
 
+    @staticmethod
+    def _clean_host(host_url: Optional[str]) -> str:
+        """Strip trailing slashes and /api suffix so /api is never duplicated."""
+        h = (host_url or "http://localhost:8080").strip().rstrip("/")
+        if h.endswith("/api"):
+            h = h[:-4].rstrip("/")
+        return h or "http://localhost:8080"
+
     def __init__(self, host_url: str = "http://localhost:8080", auth_token: Optional[str] = None):
-        self.host_url = host_url.rstrip("/") if host_url else "http://localhost:8080"
+        self.host_url = self._clean_host(host_url)
         self.auth_token = auth_token
 
     def is_authenticated(self) -> bool:
@@ -143,7 +151,7 @@ class KitsuService:
         method: str = "GET"
     ) -> Any:
         """Send JSON HTTP request to Kitsu backend."""
-        host_to_use = (host or getattr(self, "host_url", "http://localhost:8080")).rstrip("/")
+        host_to_use = self._clean_host(host or getattr(self, "host_url", "http://localhost:8080"))
         token_to_use = token or getattr(self, "auth_token", None)
         url = f"{host_to_use}/api{endpoint}"
 
@@ -368,11 +376,46 @@ class KitsuService:
         inst = self_or_cls if isinstance(self_or_cls, KitsuService) else kitsu_client
         return inst._api_request("/data/task-status", method="GET")
 
-    def get_shot_by_name(self_or_cls, name: str, host: Optional[str] = None, token: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def get_shot_by_name(
+        self_or_cls,
+        name: str,
+        sequence_name: Optional[str] = None,
+        project_id: Optional[str] = None,
+        host: Optional[str] = None,
+        token: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Find a shot by name in Kitsu, trying exact name and common studio naming variations."""
+        if not name:
+            return None
         inst = self_or_cls if isinstance(self_or_cls, KitsuService) else kitsu_client
-        shots = inst._api_request(f"/data/shots?name={urllib.parse.quote(name)}", host=host, token=token, method="GET")
-        if isinstance(shots, list) and shots:
-            return shots[0]
+
+        candidates = [name.strip()]
+        # Try stripping sequence prefix: e.g. "sq01_sh010" -> "sh010"
+        if "_" in name:
+            parts = name.split("_")
+            candidates.append(parts[-1])
+            candidates.append(name.replace("_", "-"))
+        if "-" in name:
+            parts = name.split("-")
+            candidates.append(parts[-1])
+            candidates.append(name.replace("-", "_"))
+
+        # Deduplicate while preserving order
+        unique_cands = []
+        for c in candidates:
+            if c and c not in unique_cands:
+                unique_cands.append(c)
+
+        for cand in unique_cands:
+            try:
+                url = f"/data/shots?name={urllib.parse.quote(cand)}"
+                if project_id:
+                    url += f"&project_id={project_id}"
+                shots = inst._api_request(url, host=host, token=token, method="GET")
+                if isinstance(shots, list) and shots:
+                    return shots[0]
+            except Exception:
+                pass
         return None
 
     def get_task_comments(
@@ -390,6 +433,7 @@ class KitsuService:
         task_id: str,
         comment: str,
         task_status_id: Optional[str] = None,
+        attachment_path: Optional[str] = None,
         host: Optional[str] = None,
         token: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -397,7 +441,22 @@ class KitsuService:
         payload: Dict[str, Any] = {"comment": comment}
         if task_status_id:
             payload["task_status_id"] = task_status_id
-        return inst._api_request(f"/actions/tasks/{task_id}/comment", host=host, token=token, data=payload, method="POST")
+        res = inst._api_request(f"/actions/tasks/{task_id}/comment", host=host, token=token, data=payload, method="POST")
+        comment_id = res.get("id") or res.get("comment_id") if isinstance(res, dict) else None
+        if comment_id and attachment_path and os.path.exists(attachment_path):
+            try:
+                prev_res = inst.upload_comment_preview(
+                    comment_id=comment_id,
+                    image_path=attachment_path,
+                    task_id=task_id,
+                    host=host,
+                    token=token
+                )
+                if isinstance(res, dict):
+                    res["preview_file"] = prev_res if prev_res is not None else {"status": "ok"}
+            except Exception as pe:
+                print(f"[Kitsu] Failed to attach preview image to comment {comment_id}: {pe}")
+        return res
 
     def upload_comment_preview(
         self_or_cls,
@@ -410,12 +469,14 @@ class KitsuService:
         """
         Upload preview image/snapshot and attach it to the comment in Kitsu (Zou).
         Follows the official Zou/Gazu workflow:
-          1. POST /api/actions/tasks/{task_id}/comments/{comment_id}/add-preview -> returns {id: preview_file_id}
-          2. POST /api/pictures/preview-files/{preview_file_id} (multipart 'file')
+          1. POST /api/actions/tasks/{task_id}/comments/{comment_id}/add-attachment (official Zou attachment endpoint)
+          2. POST /api/actions/tasks/{task_id}/comments/{comment_id}/add-preview -> returns {id: preview_file_id}
+             then upload file bytes to /api/pictures/preview-files/{preview_file_id}
         With multi-endpoint fallbacks for diverse Kitsu/Zou server versions.
         """
         inst = self_or_cls if isinstance(self_or_cls, KitsuService) else kitsu_client
-        host_to_use = (host or getattr(inst, "host_url", "http://localhost:8080")).rstrip("/")
+        host_clean = inst._clean_host(host or getattr(inst, "host_url", "http://localhost:8080"))
+        api_base = f"{host_clean}/api"
         token_to_use = token or getattr(inst, "auth_token", None)
 
         if not os.path.exists(image_path) or os.path.getsize(image_path) == 0:
@@ -427,32 +488,54 @@ class KitsuService:
         filename = os.path.basename(image_path)
         mime_type = mimetypes.guess_type(image_path)[0] or "image/png"
 
-        def _send_multipart(target_url: str) -> Optional[Dict[str, Any]]:
+        def _send_multipart(target_url: str, field_name: str = "file") -> Optional[Dict[str, Any]]:
             boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
-            body = (
+            part = (
                 f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+                f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
                 f"Content-Type: {mime_type}\r\n\r\n"
-            ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+            ).encode("utf-8") + file_bytes + b"\r\n"
+            body = part + f"--{boundary}--\r\n".encode("utf-8")
 
             headers = {
                 "Content-Type": f"multipart/form-data; boundary={boundary}",
                 "Content-Length": str(len(body)),
                 "User-Agent": "VFXPlayer-ReviewPlatform/1.0",
+                "Accept": "application/json, text/plain, */*",
             }
             if token_to_use:
                 headers["Authorization"] = f"Bearer {token_to_use}"
 
             req = urllib.request.Request(target_url, data=body, headers=headers, method="POST")
             try:
-                with urllib.request.urlopen(req, timeout=20) as response:
-                    resp_text = response.read().decode("utf-8")
-                    return json.loads(resp_text) if resp_text else {}
-            except Exception:
+                with urllib.request.urlopen(req, timeout=25) as response:
+                    resp_text = response.read().decode("utf-8", errors="replace").strip()
+                    if not resp_text:
+                        return {"status": "ok"}
+                    try:
+                        return json.loads(resp_text)
+                    except Exception:
+                        return {"status": "ok", "raw": resp_text}
+            except urllib.error.HTTPError as he:
+                if he.code == 400 and field_name == "file":
+                    # Fallback with field_name="attachment" in a separate single request
+                    return _send_multipart(target_url, field_name="attachment")
+                err_body = he.read().decode("utf-8", errors="replace")
+                print(f"[Kitsu] Multipart upload HTTP {he.code} on {target_url}: {err_body}")
+                return None
+            except Exception as ex:
+                print(f"[Kitsu] Multipart upload exception on {target_url}: {ex}")
                 return None
 
-        # Workflow A (Official Zou/Gazu Standard):
-        # 1. Create preview model for comment
+        # Workflow 1: Direct Zou official comment attachment endpoint
+        if task_id:
+            att_url = f"{api_base}/actions/tasks/{task_id}/comments/{comment_id}/add-attachment"
+            res = _send_multipart(att_url, field_name="file")
+            if res is not None:
+                return res
+
+        # Workflow 2 (Official Zou/Gazu Preview Standard):
+        # 2a. Create preview model for comment
         preview_file_id = None
         if task_id:
             try:
@@ -465,8 +548,8 @@ class KitsuService:
                 )
                 if isinstance(add_prev_res, dict):
                     preview_file_id = add_prev_res.get("id") or add_prev_res.get("preview_file_id")
-            except Exception:
-                pass
+            except Exception as pe:
+                print(f"[Kitsu] add-preview error: {pe}")
 
         if not preview_file_id:
             try:
@@ -482,26 +565,36 @@ class KitsuService:
             except Exception:
                 pass
 
-        # 2. Upload file bytes to the created preview entity
+        # 2b. Upload file bytes to the created preview entity
         if preview_file_id:
-            up_url = f"{host_to_use}/api/pictures/preview-files/{preview_file_id}"
-            res = _send_multipart(up_url)
-            if res is not None:
-                return res
+            preview_upload_urls = [
+                f"{api_base}/pictures/preview-files/{preview_file_id}",
+                f"{host_clean}/pictures/preview-files/{preview_file_id}",
+            ]
+            if task_id:
+                preview_upload_urls.append(
+                    f"{api_base}/actions/tasks/{task_id}/comments/{comment_id}/preview-files/{preview_file_id}"
+                )
+            for up_url in preview_upload_urls:
+                res = _send_multipart(up_url, field_name="file")
+                if res is not None:
+                    return res
 
-        # Workflow B: Direct attachment endpoints on Zou / Kitsu
+        # Workflow 3: Additional attachment & preview endpoints on Zou / Kitsu
         candidate_urls = [
-            f"{host_to_use}/api/data/comments/{comment_id}/preview-file",
-            f"{host_to_use}/api/actions/comments/{comment_id}/preview-file",
+            f"{api_base}/data/comments/{comment_id}/attachments",
+            f"{api_base}/comments/{comment_id}/attachments",
+            f"{api_base}/data/comments/{comment_id}/preview-file",
+            f"{api_base}/actions/comments/{comment_id}/preview-file",
+            f"{api_base}/actions/comments/{comment_id}/add-attachment",
         ]
         if task_id:
             candidate_urls.extend([
-                f"{host_to_use}/api/actions/tasks/{task_id}/comments/{comment_id}/add-attachment",
-                f"{host_to_use}/api/actions/tasks/{task_id}/comments/{comment_id}/preview-file",
+                f"{api_base}/actions/tasks/{task_id}/comments/{comment_id}/preview-file",
             ])
 
         for curl in candidate_urls:
-            res = _send_multipart(curl)
+            res = _send_multipart(curl, field_name="file")
             if res is not None:
                 return res
 
@@ -522,7 +615,7 @@ class KitsuService:
         Caches file so repeated requests return immediately.
         """
         inst = self_or_cls if isinstance(self_or_cls, KitsuService) else kitsu_client
-        host_to_use = (host or getattr(inst, "host_url", "http://localhost:8080")).rstrip("/")
+        host_to_use = inst._clean_host(host or getattr(inst, "host_url", "http://localhost:8080"))
         token_to_use = token or getattr(inst, "auth_token", None)
 
         cache_dir = os.path.join(tempfile.gettempdir(), "vfxplayer_kitsu_cache")
@@ -604,7 +697,7 @@ class KitsuService:
         if not preview_file_id:
             return None
         inst = self_or_cls if isinstance(self_or_cls, KitsuService) else kitsu_client
-        host_to_use = (host or getattr(inst, "host_url", "http://localhost:8080")).rstrip("/")
+        host_to_use = inst._clean_host(host or getattr(inst, "host_url", "http://localhost:8080"))
         token_to_use = token or getattr(inst, "auth_token", None)
 
         cache_dir = os.path.join(tempfile.gettempdir(), "vfxplayer_kitsu_cache", "thumbs")
@@ -635,6 +728,32 @@ class KitsuService:
                 continue
         return None
 
+    @staticmethod
+    def _extract_preview_id(data: Any) -> Optional[str]:
+        """Extract preview file ID from comment or task dictionary across Zou API schema variations."""
+        if not isinstance(data, dict):
+            return None
+        p_id = data.get("preview_file_id") or data.get("last_preview_file_id")
+        if p_id:
+            return str(p_id)
+        previews = data.get("previews")
+        if isinstance(previews, list) and previews:
+            p0 = previews[0]
+            if isinstance(p0, dict):
+                val = p0.get("id") or p0.get("preview_file_id")
+                if val:
+                    return str(val)
+            elif isinstance(p0, str) and p0:
+                return str(p0)
+        pf = data.get("preview_file")
+        if isinstance(pf, dict):
+            val = pf.get("id") or pf.get("preview_file_id")
+            if val:
+                return str(val)
+        elif isinstance(pf, str) and pf:
+            return str(pf)
+        return None
+
     def get_tasks_for_shot(
         self_or_cls,
         shot_id: str,
@@ -645,18 +764,27 @@ class KitsuService:
         if not shot_id:
             return []
         inst = self_or_cls if isinstance(self_or_cls, KitsuService) else kitsu_client
+        endpoints = [
+            f"/data/shots/{shot_id}/tasks",
+            f"/data/tasks?entity_id={shot_id}",
+            f"/data/tasks?shot_id={shot_id}",
+        ]
+        for ep in endpoints:
+            try:
+                tasks = inst._api_request(ep, host=host, token=token, method="GET")
+                if isinstance(tasks, list) and tasks:
+                    return tasks
+            except Exception:
+                pass
+
+        # If shot_id was given as a shot name instead of UUID, attempt lookup
         try:
-            tasks = inst._api_request(f"/data/shots/{shot_id}/tasks", host=host, token=token, method="GET")
-            if isinstance(tasks, list):
-                return tasks
+            s_data = inst.get_shot_by_name(shot_id, host=host, token=token)
+            if s_data and s_data.get("id") and s_data["id"] != shot_id:
+                return inst.get_tasks_for_shot(s_data["id"], host=host, token=token)
         except Exception:
             pass
-        try:
-            tasks = inst._api_request(f"/data/tasks?entity_id={shot_id}", host=host, token=token, method="GET")
-            if isinstance(tasks, list):
-                return tasks
-        except Exception:
-            pass
+
         return []
 
     def get_shot_versions_and_tasks(
@@ -682,7 +810,7 @@ class KitsuService:
         except Exception:
             task_statuses = {}
 
-        versions = []
+        versions: List[Dict[str, Any]] = []
         for task in tasks:
             t_id = task.get("id")
             t_type_name = task.get("task_type_name") or task_types.get(task.get("task_type_id"), task.get("name", "Task"))
@@ -692,34 +820,60 @@ class KitsuService:
                 comments = inst.get_task_comments(t_id, host=host, token=token)
             except Exception:
                 comments = []
-            preview_comments = [c for c in comments if c.get("preview_file_id")]
 
-            if preview_comments:
-                for v_idx, c in enumerate(preview_comments):
-                    p_id = c.get("preview_file_id")
+            # Sort comments chronologically ascending so v001 is earliest
+            def _comment_key(c):
+                return c.get("created_at") or c.get("updated_at") or ""
+            sorted_comments = sorted(comments, key=_comment_key)
+
+            preview_entries: List[Tuple[str, Dict[str, Any]]] = []
+            seen_p_ids = set()
+
+            for c in sorted_comments:
+                p_id = KitsuService._extract_preview_id(c)
+                if p_id and p_id not in seen_p_ids:
+                    seen_p_ids.add(p_id)
+                    preview_entries.append((p_id, c))
+
+            # If task has a preview file ID not present in comments, append as latest
+            task_p_id = KitsuService._extract_preview_id(task)
+            if task_p_id and task_p_id not in seen_p_ids:
+                seen_p_ids.add(task_p_id)
+                preview_entries.append((task_p_id, {
+                    "preview_file_id": task_p_id,
+                    "created_at": task.get("updated_at", ""),
+                    "person_name": "",
+                    "text": "",
+                    "task_status_name": t_status_name
+                }))
+
+            if preview_entries:
+                for v_idx, (p_id, c) in enumerate(preview_entries):
                     author = c.get("person_name") or (c.get("person", {}).get("first_name", "") if isinstance(c.get("person"), dict) else "")
+                    is_latest = (v_idx == len(preview_entries) - 1)
                     versions.append({
                         "task_id": t_id,
                         "task_name": t_type_name,
                         "version_num": v_idx + 1,
-                        "version_label": f"{t_type_name} v{v_idx + 1:03d}" + (" (Latest)" if v_idx == len(preview_comments) - 1 else ""),
+                        "version_label": f"{t_type_name} v{v_idx + 1:03d}" + (" (Latest)" if is_latest else ""),
                         "preview_file_id": p_id,
                         "status": c.get("task_status_name") or t_status_name,
                         "author": author,
                         "created_at": c.get("created_at", "")[:10] if c.get("created_at") else "",
                         "comment": c.get("text", "") or c.get("comment", ""),
                     })
-            elif task.get("preview_file_id"):
+            elif t_id:
+                # Task exists but has no uploaded preview yet
                 versions.append({
                     "task_id": t_id,
                     "task_name": t_type_name,
                     "version_num": 1,
-                    "version_label": f"{t_type_name} v001 (Current)",
-                    "preview_file_id": task.get("preview_file_id"),
+                    "version_label": f"{t_type_name} (No Preview)",
+                    "preview_file_id": None,
                     "status": t_status_name,
                     "author": "",
                     "created_at": task.get("updated_at", "")[:10] if task.get("updated_at") else "",
-                    "comment": "",
+                    "comment": "Task registered in Kitsu",
                 })
 
         return versions

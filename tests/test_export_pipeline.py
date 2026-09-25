@@ -158,7 +158,7 @@ class TestExportPipeline(unittest.TestCase):
     def test_burnin_presets_and_timecode(self):
         """Test burn-in drawing for all presets and timecode without crashing."""
         core = PlayerCore()
-        for preset_name in ['client_review', 'internal_vfx', 'dailies', 'vfx_ref']:
+        for preset_name in ['client_review', 'internal_vfx', 'dailies', 'vfx_ref', 'netflix']:
             worker = ExportWorker(
                 core=core, output_path="dummy.mp4", start_frame=1001, end_frame=1100,
                 format_preset="mp4", width=1920, height=1080, aspect_mode="fill", fps=24.0,

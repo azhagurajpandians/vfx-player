@@ -60,7 +60,7 @@ class VersionCompareDialog(QtWidgets.QDialog):
                 border: 1px solid #2e2e38;
                 border-radius: 6px;
                 margin-bottom: 4px;
-                padding: 4px;
+                padding: 2px 4px;
             }
             QListWidget::item:hover {
                 background-color: #272732;
@@ -212,12 +212,12 @@ class VersionCompareDialog(QtWidgets.QDialog):
         for v in self.filtered_versions:
             row_widget = QtWidgets.QWidget()
             row_layout = QtWidgets.QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(6, 4, 6, 4)
+            row_layout.setContentsMargins(8, 6, 8, 6)
             row_layout.setSpacing(10)
 
             # Thumbnail preview
             lbl_thumb = QtWidgets.QLabel()
-            lbl_thumb.setFixedSize(64, 36)
+            lbl_thumb.setFixedSize(64, 38)
             lbl_thumb.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             lbl_thumb.setStyleSheet("background-color: #09090b; border: 1px solid #27272a; border-radius: 4px; color: #52525b;")
             lbl_thumb.setText("🎬")
@@ -228,19 +228,19 @@ class VersionCompareDialog(QtWidgets.QDialog):
             if p_id:
                 thumb_p = kitsu_client.download_thumbnail(p_id)
                 if thumb_p and os.path.exists(thumb_p):
-                    pix = QtGui.QPixmap(thumb_p).scaled(64, 36, QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding, QtCore.Qt.TransformationMode.SmoothTransformation)
+                    pix = QtGui.QPixmap(thumb_p).scaled(64, 38, QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding, QtCore.Qt.TransformationMode.SmoothTransformation)
                     lbl_thumb.setPixmap(pix)
             elif media_p and os.path.exists(media_p):
                 # Local image / video
                 pix = QtGui.QPixmap(media_p)
                 if not pix.isNull():
-                    lbl_thumb.setPixmap(pix.scaled(64, 36, QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding, QtCore.Qt.TransformationMode.SmoothTransformation))
+                    lbl_thumb.setPixmap(pix.scaled(64, 38, QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding, QtCore.Qt.TransformationMode.SmoothTransformation))
 
             row_layout.addWidget(lbl_thumb)
 
             # Info column
             info_box = QtWidgets.QVBoxLayout()
-            info_box.setSpacing(2)
+            info_box.setSpacing(4)
             info_box.setContentsMargins(0, 0, 0, 0)
 
             # Version label row
@@ -278,7 +278,7 @@ class VersionCompareDialog(QtWidgets.QDialog):
                 row_layout.addWidget(lbl_st)
 
             item = QtWidgets.QListWidgetItem()
-            item.setSizeHint(QtCore.QSize(0, 48))
+            item.setSizeHint(QtCore.QSize(0, 58))
             item.setData(QtCore.Qt.ItemDataRole.UserRole, v)
             self.list_widget.addItem(item)
             self.list_widget.setItemWidget(item, row_widget)

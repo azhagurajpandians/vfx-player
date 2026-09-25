@@ -230,7 +230,8 @@ class ExportWorker(QtCore.QThread):
                 try:
                     from core.slate_builder import SlateBuilder, SlateConfig
                     slate_cfg = SlateConfig.from_dict(self.slate_options.get('config', {}))
-                    slate_rgb = SlateBuilder.create_slate(target_w, target_h, slate_cfg)
+                    thumb = self.core.get_frame(self.start_frame) if self.core else None
+                    slate_rgb = SlateBuilder.create_slate(target_w, target_h, slate_cfg, thumbnail=thumb)
                     duration_frames = max(1, int(self.slate_options.get('duration_frames', 1)))
                     for _ in range(duration_frames):
                         proc.stdin.write(slate_rgb.tobytes())
@@ -524,7 +525,25 @@ class ExportWorker(QtCore.QThread):
         preset = self.burnin_options.get('preset', 'vfx_ref')
         date_str = datetime.date.today().strftime('%Y-%m-%d')
 
-        if preset == 'client_review':
+        if preset == 'netflix':
+            # Netflix VFX Standard:
+            # Top-Left: Vendor / Studio
+            # Top-Center: Show Name
+            # Top-Right: Date (YYYY-MM-DD)
+            # Bottom-Left: Version Name
+            # Bottom-Right: Start Frame - Current Frame - End Frame
+            vendor_txt = studio or "Template Team"
+            show_txt = self.burnin_options.get('show', '') or proj_code or "Netflix VFX Template Demo Show"
+            self._draw_text(img_uint8, vendor_txt, "top_left", font, font_scale, font_thickness, margin, bg_alpha)
+            if show_txt:
+                self._draw_text(img_uint8, show_txt, "top_center", font, font_scale, font_thickness, margin, bg_alpha)
+            self._draw_text(img_uint8, date_str, "top_right", font, font_scale, font_thickness, margin, bg_alpha)
+            v_name = self.burnin_options.get('version_name', '') or (f"{shot}_{version_str}" if (shot and version_str) else (shot or version_str))
+            if v_name:
+                self._draw_text(img_uint8, v_name, "bottom_left", font, font_scale, font_thickness, margin, bg_alpha)
+            self._draw_text(img_uint8, frame_str, "bottom_right", font, font_scale, font_thickness, margin, bg_alpha)
+
+        elif preset == 'client_review':
             # Client Review: Shot, Version, Timecode, Frame
             if shot:
                 self._draw_text(img_uint8, shot, "top_left", font, font_scale, font_thickness, margin, bg_alpha)
@@ -954,6 +973,7 @@ class ExportDialog(QtWidgets.QDialog):
         burn_header.addWidget(QtWidgets.QLabel("Preset:"))
         self.preset_combo = QtWidgets.QComboBox()
         self.preset_combo.addItem("Full VFX Reference", "vfx_ref")
+        self.preset_combo.addItem("Netflix VFX Standard", "netflix")
         self.preset_combo.addItem("Client Review (Shot / Ver / TC / FR)", "client_review")
         self.preset_combo.addItem("Internal VFX (Shot / Ver / Artist / CS / TC)", "internal_vfx")
         self.preset_combo.addItem("Dailies (Shot / Ver / Task / TC / File)", "dailies")
@@ -1102,43 +1122,109 @@ class ExportDialog(QtWidgets.QDialog):
         slate_header.addWidget(self.slate_preview_btn)
         slate_layout.addLayout(slate_header)
 
+        # Template Selection Row
+        template_bar = QtWidgets.QHBoxLayout()
+        template_bar.addWidget(QtWidgets.QLabel("Slate Template:"))
+        self.slate_template_combo = QtWidgets.QComboBox()
+        self.slate_template_combo.addItem("Standard Studio Slate", "standard")
+        self.slate_template_combo.addItem("Netflix VFX Delivery Slate", "netflix")
+        self.slate_template_combo.currentIndexChanged.connect(self._on_slate_template_changed)
+        template_bar.addWidget(self.slate_template_combo)
+        template_bar.addStretch()
+        slate_layout.addLayout(template_bar)
+
         slate_grid = QtWidgets.QGridLayout()
         slate_grid.setSpacing(6)
 
         slate_grid.addWidget(QtWidgets.QLabel("Show / Production:"), 0, 0)
-        self.slate_show_edit = QtWidgets.QLineEdit("FEATURE FILM")
+        self.slate_show_edit = QtWidgets.QLineEdit("Netflix VFX Templates")
         slate_grid.addWidget(self.slate_show_edit, 0, 1)
 
-        slate_grid.addWidget(QtWidgets.QLabel("Sequence:"), 0, 2)
-        self.slate_seq_edit = QtWidgets.QLineEdit("SEQ01")
-        slate_grid.addWidget(self.slate_seq_edit, 0, 3)
+        slate_grid.addWidget(QtWidgets.QLabel("Submitting For:"), 0, 2)
+        self.slate_submitting_edit = QtWidgets.QLineEdit("SAMPLE")
+        slate_grid.addWidget(self.slate_submitting_edit, 0, 3)
 
-        slate_grid.addWidget(QtWidgets.QLabel("Shot:"), 1, 0)
+        slate_grid.addWidget(QtWidgets.QLabel("Sequence:"), 1, 0)
+        self.slate_seq_edit = QtWidgets.QLineEdit("001")
+        slate_grid.addWidget(self.slate_seq_edit, 1, 1)
+
+        slate_grid.addWidget(QtWidgets.QLabel("Episode:"), 1, 2)
+        self.slate_episode_edit = QtWidgets.QLineEdit("101")
+        slate_grid.addWidget(self.slate_episode_edit, 1, 3)
+
+        slate_grid.addWidget(QtWidgets.QLabel("Shot Name:"), 2, 0)
         self.slate_shot_edit = QtWidgets.QLineEdit(shot_def)
-        slate_grid.addWidget(self.slate_shot_edit, 1, 1)
+        slate_grid.addWidget(self.slate_shot_edit, 2, 1)
 
-        slate_grid.addWidget(QtWidgets.QLabel("Version:"), 1, 2)
+        slate_grid.addWidget(QtWidgets.QLabel("Scene:"), 2, 2)
+        self.slate_scene_edit = QtWidgets.QLineEdit("001")
+        slate_grid.addWidget(self.slate_scene_edit, 2, 3)
+
+        slate_grid.addWidget(QtWidgets.QLabel("Version:"), 3, 0)
         self.slate_ver_edit = QtWidgets.QLineEdit("v001")
-        slate_grid.addWidget(self.slate_ver_edit, 1, 3)
+        slate_grid.addWidget(self.slate_ver_edit, 3, 1)
 
-        slate_grid.addWidget(QtWidgets.QLabel("Artist:"), 2, 0)
+        slate_grid.addWidget(QtWidgets.QLabel("Shot Types:"), 3, 2)
+        self.slate_shot_types_edit = QtWidgets.QLineEdit("2d comp")
+        slate_grid.addWidget(self.slate_shot_types_edit, 3, 3)
+
+        slate_grid.addWidget(QtWidgets.QLabel("Full Version Name:"), 4, 0)
+        ver_name_def = f"{shot_def}_slate_VND_v001" if shot_def else "nflx_101_001_0020_slate_VND_v001"
+        self.slate_version_name_edit = QtWidgets.QLineEdit(ver_name_def)
+        slate_grid.addWidget(self.slate_version_name_edit, 4, 1)
+
+        slate_grid.addWidget(QtWidgets.QLabel("Media Color:"), 4, 2)
+        self.slate_color_edit = QtWidgets.QLineEdit("rec709 with show lut")
+        slate_grid.addWidget(self.slate_color_edit, 4, 3)
+
+        slate_grid.addWidget(QtWidgets.QLabel("Artist:"), 5, 0)
         self.slate_artist_edit = QtWidgets.QLineEdit("Lead Compositor")
-        slate_grid.addWidget(self.slate_artist_edit, 2, 1)
+        slate_grid.addWidget(self.slate_artist_edit, 5, 1)
 
-        slate_grid.addWidget(QtWidgets.QLabel("Department:"), 2, 2)
+        slate_grid.addWidget(QtWidgets.QLabel("Department:"), 5, 2)
         self.slate_dept_edit = QtWidgets.QLineEdit("Comp / VFX")
-        slate_grid.addWidget(self.slate_dept_edit, 2, 3)
+        slate_grid.addWidget(self.slate_dept_edit, 5, 3)
 
-        slate_grid.addWidget(QtWidgets.QLabel("Colorspace:"), 3, 0)
+        slate_grid.addWidget(QtWidgets.QLabel("Colorspace:"), 6, 0)
         active_cs = "ACEScg"
         if hasattr(self.core, 'loader') and hasattr(self.core.loader, 'output_cs') and self.core.loader.output_cs:
             active_cs = self.core.loader.output_cs
         self.slate_cs_edit = QtWidgets.QLineEdit(active_cs)
-        slate_grid.addWidget(self.slate_cs_edit, 3, 1)
+        slate_grid.addWidget(self.slate_cs_edit, 6, 1)
 
-        slate_grid.addWidget(QtWidgets.QLabel("Notes:"), 3, 2)
+        slate_grid.addWidget(QtWidgets.QLabel("Notes:"), 6, 2)
         self.slate_notes_edit = QtWidgets.QLineEdit("Review Delivery")
-        slate_grid.addWidget(self.slate_notes_edit, 3, 3)
+        slate_grid.addWidget(self.slate_notes_edit, 6, 3)
+
+        slate_grid.addWidget(QtWidgets.QLabel("Shot Description:"), 7, 0)
+        self.slate_desc_edit = QtWidgets.QLineEdit("If a description field is required, it goes on the left to provide more space.")
+        slate_grid.addWidget(self.slate_desc_edit, 7, 1, 1, 3)
+
+        slate_grid.addWidget(QtWidgets.QLabel("VFX Scope of Work:"), 8, 0)
+        self.slate_scope_edit = QtWidgets.QLineEdit("Demo a sample slate.")
+        slate_grid.addWidget(self.slate_scope_edit, 8, 1, 1, 3)
+
+        slate_grid.addWidget(QtWidgets.QLabel("Submission Note:"), 9, 0)
+        self.slate_note_edit = QtWidgets.QLineEdit("Submitting as an example with all template fields filled out.")
+        slate_grid.addWidget(self.slate_note_edit, 9, 1, 1, 3)
+
+        # Dedicated Vendor Logo picker row
+        slate_grid.addWidget(QtWidgets.QLabel("Vendor Logo:"), 10, 0)
+        logo_lay = QtWidgets.QHBoxLayout()
+        self.slate_logo_edit = QtWidgets.QLineEdit()
+        self.slate_logo_edit.setPlaceholderText("Select vendor logo image (PNG with transparency, JPG)...")
+        if hasattr(self.parent(), 'prefs') and self.parent().prefs.get('vendor_logo_path'):
+            self.slate_logo_edit.setText(self.parent().prefs.get('vendor_logo_path', ''))
+        self.slate_logo_browse = QtWidgets.QPushButton("Browse...")
+        self.slate_logo_browse.setFixedWidth(70)
+        self.slate_logo_browse.clicked.connect(self._browse_slate_logo)
+        self.slate_logo_clear = QtWidgets.QPushButton("Clear")
+        self.slate_logo_clear.setFixedWidth(50)
+        self.slate_logo_clear.clicked.connect(lambda: self.slate_logo_edit.clear())
+        logo_lay.addWidget(self.slate_logo_edit)
+        logo_lay.addWidget(self.slate_logo_browse)
+        logo_lay.addWidget(self.slate_logo_clear)
+        slate_grid.addLayout(logo_lay, 10, 1, 1, 3)
 
         slate_layout.addLayout(slate_grid)
         self._toggle_slate_inputs(False)
@@ -1219,16 +1305,47 @@ class ExportDialog(QtWidgets.QDialog):
 
     def _toggle_slate_inputs(self, state):
         enabled = (state == 2 or state is True)
-        self.slate_show_edit.setEnabled(enabled)
-        self.slate_seq_edit.setEnabled(enabled)
-        self.slate_shot_edit.setEnabled(enabled)
-        self.slate_ver_edit.setEnabled(enabled)
-        self.slate_artist_edit.setEnabled(enabled)
-        self.slate_dept_edit.setEnabled(enabled)
-        self.slate_cs_edit.setEnabled(enabled)
-        self.slate_notes_edit.setEnabled(enabled)
-        self.slate_duration_spin.setEnabled(enabled)
-        self.slate_preview_btn.setEnabled(enabled)
+        if hasattr(self, 'slate_template_combo'): self.slate_template_combo.setEnabled(enabled)
+        if hasattr(self, 'slate_show_edit'): self.slate_show_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_submitting_edit'): self.slate_submitting_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_seq_edit'): self.slate_seq_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_episode_edit'): self.slate_episode_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_shot_edit'): self.slate_shot_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_scene_edit'): self.slate_scene_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_ver_edit'): self.slate_ver_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_shot_types_edit'): self.slate_shot_types_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_version_name_edit'): self.slate_version_name_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_color_edit'): self.slate_color_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_artist_edit'): self.slate_artist_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_dept_edit'): self.slate_dept_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_cs_edit'): self.slate_cs_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_notes_edit'): self.slate_notes_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_desc_edit'): self.slate_desc_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_scope_edit'): self.slate_scope_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_note_edit'): self.slate_note_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_duration_spin'): self.slate_duration_spin.setEnabled(enabled)
+        if hasattr(self, 'slate_preview_btn'): self.slate_preview_btn.setEnabled(enabled)
+        if hasattr(self, 'slate_logo_edit'): self.slate_logo_edit.setEnabled(enabled)
+        if hasattr(self, 'slate_logo_browse'): self.slate_logo_browse.setEnabled(enabled)
+        if hasattr(self, 'slate_logo_clear'): self.slate_logo_clear.setEnabled(enabled)
+
+    def _browse_slate_logo(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Select Vendor Logo", "", "Images (*.png *.jpg *.jpeg *.bmp);;All Files (*.*)"
+        )
+        if path:
+            self.slate_logo_edit.setText(path)
+            # Save in parent prefs
+            if hasattr(self.parent(), 'prefs') and isinstance(self.parent().prefs, dict):
+                self.parent().prefs['vendor_logo_path'] = path
+                if hasattr(self.parent(), 'save_preferences'):
+                    try:
+                        self.parent().save_preferences()
+                    except Exception:
+                        pass
+
+    def _on_slate_template_changed(self, idx):
+        pass
 
     def _get_fps(self) -> float:
         fps = 24.0
@@ -1245,7 +1362,7 @@ class ExportDialog(QtWidgets.QDialog):
 
     def _on_preset_changed(self, idx):
         preset = self.preset_combo.currentData()
-        if preset in ('client_review', 'internal_vfx', 'dailies'):
+        if preset in ('client_review', 'internal_vfx', 'dailies', 'netflix'):
             self.timecode_chk.setChecked(True)
 
     def _on_slate_preview(self):
@@ -1259,22 +1376,48 @@ class ExportDialog(QtWidgets.QDialog):
             h = getattr(self.core.media, 'height', 1080) or 1080
 
         fps = self._get_fps()
+        thumb = None
+        if hasattr(self, 'core') and self.core and self.core.media:
+            try:
+                thumb = self.core.get_frame(self.start_spin.value())
+            except Exception:
+                try:
+                    thumb = self.core.get_frame(self.core.current_frame)
+                except Exception:
+                    pass
+
+        template = self.slate_template_combo.currentData() if hasattr(self, 'slate_template_combo') else 'standard'
+        vendor_logo = self.slate_logo_edit.text().strip() if hasattr(self, 'slate_logo_edit') else ''
+        if not vendor_logo and hasattr(self, 'logo_path_edit'):
+            vendor_logo = self.logo_path_edit.text().strip()
+
         cfg = SlateConfig(
-            show=self.slate_show_edit.text().strip(),
-            sequence=self.slate_seq_edit.text().strip(),
-            shot=self.slate_shot_edit.text().strip(),
-            version=self.slate_ver_edit.text().strip(),
-            artist=self.slate_artist_edit.text().strip(),
-            department=self.slate_dept_edit.text().strip(),
-            colorspace=self.slate_cs_edit.text().strip(),
-            notes=self.slate_notes_edit.text().strip(),
-            studio=self.studio_edit.text().strip(),
+            template=template,
+            show=self.slate_show_edit.text().strip() if hasattr(self, 'slate_show_edit') else '',
+            submitting_for=self.slate_submitting_edit.text().strip() if hasattr(self, 'slate_submitting_edit') else 'SAMPLE',
+            sequence=self.slate_seq_edit.text().strip() if hasattr(self, 'slate_seq_edit') else '',
+            shot=self.slate_shot_edit.text().strip() if hasattr(self, 'slate_shot_edit') else '',
+            version=self.slate_ver_edit.text().strip() if hasattr(self, 'slate_ver_edit') else 'v001',
+            version_name=self.slate_version_name_edit.text().strip() if hasattr(self, 'slate_version_name_edit') else '',
+            artist=self.slate_artist_edit.text().strip() if hasattr(self, 'slate_artist_edit') else '',
+            department=self.slate_dept_edit.text().strip() if hasattr(self, 'slate_dept_edit') else '',
+            colorspace=self.slate_cs_edit.text().strip() if hasattr(self, 'slate_cs_edit') else 'ACEScg',
+            media_color=self.slate_color_edit.text().strip() if hasattr(self, 'slate_color_edit') else 'rec709 with show lut',
+            shot_types=self.slate_shot_types_edit.text().strip() if hasattr(self, 'slate_shot_types_edit') else '2d comp',
+            episode=self.slate_episode_edit.text().strip() if hasattr(self, 'slate_episode_edit') else '101',
+            scene=self.slate_scene_edit.text().strip() if hasattr(self, 'slate_scene_edit') else '001',
+            shot_description=self.slate_desc_edit.text().strip() if hasattr(self, 'slate_desc_edit') else '',
+            scope_of_work=self.slate_scope_edit.text().strip() if hasattr(self, 'slate_scope_edit') else '',
+            submission_note=self.slate_note_edit.text().strip() if hasattr(self, 'slate_note_edit') else '',
+            notes=self.slate_notes_edit.text().strip() if hasattr(self, 'slate_notes_edit') else '',
+            studio=self.studio_edit.text().strip() if hasattr(self, 'studio_edit') else '',
             fps=str(fps),
             resolution=f"{w} x {h}",
             frame_range=f"{self.start_spin.value()} - {self.end_spin.value()}",
-            logo_path=self.logo_path_edit.text().strip()
+            logo_path=vendor_logo,
+            vendor_logo_path=vendor_logo
         )
-        slate_rgb = SlateBuilder.create_slate(w, h, cfg)
+        slate_rgb = SlateBuilder.create_slate(w, h, cfg, thumbnail=thumb)
         dlg = SlatePreviewDialog(self, slate_rgb)
         dlg.exec()
 
@@ -1379,9 +1522,11 @@ class ExportDialog(QtWidgets.QDialog):
             'font_thickness': self.thick_spin.value(),
             'bg_alpha': self.opacity_slider.value() / 10.0,
             'studio': self.studio_edit.text().strip(),
+            'show': self.slate_show_edit.text().strip() if hasattr(self, 'slate_show_edit') else self.proj_edit.text().strip(),
             'task': self.task_edit.text().strip(),
             'shot': self.shot_edit.text().strip(),
             'version': self.ver_edit.text().strip() if hasattr(self, 'ver_edit') else 'v001',
+            'version_name': self.slate_version_name_edit.text().strip() if hasattr(self, 'slate_version_name_edit') else '',
             'artist': self.artist_edit.text().strip() if hasattr(self, 'artist_edit') else '',
             'colorspace': self.slate_cs_edit.text().strip() if hasattr(self, 'slate_cs_edit') else 'ACEScg',
             'proj_code': self.proj_edit.text().strip(),
@@ -1391,23 +1536,38 @@ class ExportDialog(QtWidgets.QDialog):
         }
 
         # Prepare Delivery Slate options
+        slate_vendor_logo = self.slate_logo_edit.text().strip() if hasattr(self, 'slate_logo_edit') else ''
+        if not slate_vendor_logo and hasattr(self, 'logo_path_edit'):
+            slate_vendor_logo = self.logo_path_edit.text().strip()
+
         slate_opts = {
             'enabled': self.slate_chk.isChecked() if hasattr(self, 'slate_chk') else False,
             'duration_frames': self.slate_duration_spin.value() if hasattr(self, 'slate_duration_spin') else 1,
             'config': {
+                'template': self.slate_template_combo.currentData() if hasattr(self, 'slate_template_combo') else 'standard',
                 'show': self.slate_show_edit.text().strip() if hasattr(self, 'slate_show_edit') else '',
+                'submitting_for': self.slate_submitting_edit.text().strip() if hasattr(self, 'slate_submitting_edit') else 'SAMPLE',
                 'sequence': self.slate_seq_edit.text().strip() if hasattr(self, 'slate_seq_edit') else '',
                 'shot': self.slate_shot_edit.text().strip() if hasattr(self, 'slate_shot_edit') else '',
                 'version': self.slate_ver_edit.text().strip() if hasattr(self, 'slate_ver_edit') else 'v001',
+                'version_name': self.slate_version_name_edit.text().strip() if hasattr(self, 'slate_version_name_edit') else '',
                 'artist': self.slate_artist_edit.text().strip() if hasattr(self, 'slate_artist_edit') else '',
                 'department': self.slate_dept_edit.text().strip() if hasattr(self, 'slate_dept_edit') else '',
                 'colorspace': self.slate_cs_edit.text().strip() if hasattr(self, 'slate_cs_edit') else 'ACEScg',
+                'media_color': self.slate_color_edit.text().strip() if hasattr(self, 'slate_color_edit') else 'rec709 with show lut',
+                'shot_types': self.slate_shot_types_edit.text().strip() if hasattr(self, 'slate_shot_types_edit') else '2d comp',
+                'episode': self.slate_episode_edit.text().strip() if hasattr(self, 'slate_episode_edit') else '101',
+                'scene': self.slate_scene_edit.text().strip() if hasattr(self, 'slate_scene_edit') else '001',
+                'shot_description': self.slate_desc_edit.text().strip() if hasattr(self, 'slate_desc_edit') else '',
+                'scope_of_work': self.slate_scope_edit.text().strip() if hasattr(self, 'slate_scope_edit') else '',
+                'submission_note': self.slate_note_edit.text().strip() if hasattr(self, 'slate_note_edit') else '',
                 'notes': self.slate_notes_edit.text().strip() if hasattr(self, 'slate_notes_edit') else '',
-                'studio': self.studio_edit.text().strip(),
+                'studio': self.studio_edit.text().strip() if hasattr(self, 'studio_edit') else '',
                 'fps': str(fps),
                 'resolution': f"{w} x {h}",
                 'frame_range': f"{self.start_spin.value()} - {self.end_spin.value()}",
-                'logo_path': self.logo_path_edit.text().strip()
+                'logo_path': slate_vendor_logo,
+                'vendor_logo_path': slate_vendor_logo
             }
         }
 

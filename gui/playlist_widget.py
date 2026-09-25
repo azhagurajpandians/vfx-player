@@ -167,7 +167,7 @@ class PlaylistItemWidget(QtWidgets.QWidget):
 
 
 class ReorderablePlaylistListWidget(QtWidgets.QListWidget):
-    """QListWidget supporting multiple selection, key shortcuts, and drag-drop reordering."""
+    """QListWidget supporting multiple selection, key shortcuts, internal reordering, and external dragging to viewport slots."""
     item_reordered = QtCore.pyqtSignal(int, int)  # from_row, to_row
     delete_requested = QtCore.pyqtSignal()
 
@@ -177,12 +177,78 @@ class ReorderablePlaylistListWidget(QtWidgets.QListWidget):
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
-        self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
+        self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(QtCore.Qt.DropAction.MoveAction)
         self._drag_start_row = -1
+        self.playlist_widget = None
 
     def startDrag(self, supportedActions):
-        self._drag_start_row = self.currentRow()
-        super().startDrag(supportedActions)
+        selected_items = self.selectedItems()
+        if not selected_items:
+            return
+        item = selected_items[0]
+        row = self.row(item)
+        self._drag_start_row = row
+
+        playlist_item = None
+        if hasattr(self, 'playlist_widget') and self.playlist_widget and hasattr(self.playlist_widget, 'service'):
+            playlist_item = self.playlist_widget.service.get_item(row)
+
+        if not playlist_item:
+            super().startDrag(supportedActions)
+            return
+
+        drag = QtGui.QDrag(self)
+        mime = QtCore.QMimeData()
+
+        # Custom shot dictionary payload
+        import json
+        p_path = getattr(playlist_item, 'media_path', '') or ''
+        shot_payload = {
+            'row': row,
+            'id': getattr(playlist_item, 'id', ''),
+            'name': getattr(playlist_item, 'name', '') or getattr(playlist_item, 'shot_name', ''),
+            'shot_name': getattr(playlist_item, 'shot_name', '') or getattr(playlist_item, 'name', ''),
+            'sequence_name': getattr(playlist_item, 'sequence_name', ''),
+            'task_name': getattr(playlist_item, 'task_name', ''),
+            'version': getattr(playlist_item, 'version', ''),
+            'media_path': p_path,
+            'kitsu_preview_id': getattr(playlist_item, 'kitsu_preview_id', None),
+            'kitsu_shot_id': getattr(playlist_item, 'kitsu_shot_id', None),
+            'frame_count': getattr(playlist_item, 'frame_count', 0),
+            'fps': getattr(playlist_item, 'fps', 24.0)
+        }
+        mime.setData('application/x-vfxplayer-shot', json.dumps(shot_payload).encode('utf-8'))
+
+        # Also provide URLs and Text for universal drop compatibility
+        if p_path and os.path.exists(p_path):
+            mime.setUrls([QtCore.QUrl.fromLocalFile(p_path)])
+            mime.setText(p_path)
+        else:
+            mime.setText(shot_payload['name'] or "Shot")
+
+        drag.setMimeData(mime)
+
+        # Drag preview pixmap
+        cache_key = getattr(playlist_item, 'kitsu_preview_id', None) or p_path or getattr(playlist_item, 'id', None)
+        pix = _THUMB_CACHE.get(cache_key) if cache_key else None
+        if pix and not pix.isNull():
+            drag.setPixmap(pix.scaled(110, 62, QtCore.Qt.AspectRatioMode.KeepAspectRatio, QtCore.Qt.TransformationMode.SmoothTransformation))
+            drag.setHotSpot(QtCore.QPoint(55, 31))
+
+        drag.exec(QtCore.Qt.DropAction.CopyAction | QtCore.Qt.DropAction.MoveAction)
+
+    def dragEnterEvent(self, event: QtGui.QDragEnterEvent):
+        if event.source() == self or event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event: QtGui.QDragMoveEvent):
+        if event.source() == self or event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
 
     def dropEvent(self, event: QtGui.QDropEvent):
         if event.source() == self:
@@ -193,6 +259,11 @@ class ReorderablePlaylistListWidget(QtWidgets.QListWidget):
             event.accept()
             if source_row >= 0 and target_row >= 0 and source_row != target_row:
                 self.item_reordered.emit(source_row, target_row)
+        elif event.mimeData().hasUrls():
+            paths = [u.toLocalFile() for u in event.mimeData().urls() if u.toLocalFile()]
+            if paths and hasattr(self, 'playlist_widget') and self.playlist_widget:
+                self.playlist_widget.files_dropped.emit(paths)
+                event.acceptProposedAction()
         else:
             super().dropEvent(event)
 
@@ -211,6 +282,7 @@ class PlaylistWidget(QtWidgets.QWidget):
     """
 
     shot_selected = QtCore.pyqtSignal(object)  # PlaylistItem
+    send_to_slot_requested = QtCore.pyqtSignal(object, int)  # (PlaylistItem, slot_index)
     load_kitsu_requested = QtCore.pyqtSignal()
     publish_kitsu_requested = QtCore.pyqtSignal(object)  # PlaylistItem
     version_compare_requested = QtCore.pyqtSignal(object)  # PlaylistItem
@@ -349,6 +421,7 @@ class PlaylistWidget(QtWidgets.QWidget):
 
         # List Widget
         self.list_widget = ReorderablePlaylistListWidget()
+        self.list_widget.playlist_widget = self
         self.list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.list_widget.item_reordered.connect(self._on_item_reordered)
         self.list_widget.delete_requested.connect(self.remove_selected)
@@ -511,6 +584,16 @@ class PlaylistWidget(QtWidgets.QWidget):
         """)
 
         act_play = menu.addAction("Play Shot")
+        
+        # Grid Slot Submenu
+        grid_menu = menu.addMenu("▶ Play in Grid Slot")
+        act_slot1 = grid_menu.addAction("Slot 1 (Top-Left / Primary)")
+        act_slot2 = grid_menu.addAction("Slot 2 (Top-Right / Secondary)")
+        act_slot3 = grid_menu.addAction("Slot 3 (Bottom-Left)")
+        act_slot4 = grid_menu.addAction("Slot 4 (Bottom-Right)")
+        act_slot5 = grid_menu.addAction("Slot 5 (6-Up)")
+        act_slot6 = grid_menu.addAction("Slot 6 (6-Up)")
+
         act_versions = menu.addAction("Versions & Tasks for this Shot... (Ctrl+Alt+V)")
         act_compare_prev = menu.addAction("Compare with Previous Version (Wipe) (Ctrl+Alt+C)")
         menu.addSeparator()
@@ -528,6 +611,18 @@ class PlaylistWidget(QtWidgets.QWidget):
             self.service.set_current_index(row)
             self.set_current_index(row)
             self.shot_selected.emit(playlist_item)
+        elif action == act_slot1:
+            self.send_to_slot_requested.emit(playlist_item, 0)
+        elif action == act_slot2:
+            self.send_to_slot_requested.emit(playlist_item, 1)
+        elif action == act_slot3:
+            self.send_to_slot_requested.emit(playlist_item, 2)
+        elif action == act_slot4:
+            self.send_to_slot_requested.emit(playlist_item, 3)
+        elif action == act_slot5:
+            self.send_to_slot_requested.emit(playlist_item, 4)
+        elif action == act_slot6:
+            self.send_to_slot_requested.emit(playlist_item, 5)
         elif action == act_versions:
             self.version_compare_requested.emit(playlist_item)
         elif action == act_compare_prev:

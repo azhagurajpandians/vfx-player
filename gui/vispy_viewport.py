@@ -417,9 +417,65 @@ class VispyViewport(QtWidgets.QWidget):
         # Intercept VisPy default key handling for Esc
         self.canvas.events.key_press.connect(self._on_canvas_key_press)
 
+        # Ensure canvas native widget forwards drag and drop to VispyViewport
+        if hasattr(self.canvas, 'native') and self.canvas.native:
+            self.canvas.native.setAcceptDrops(True)
+            self.canvas.native.dragEnterEvent = self.dragEnterEvent
+            self.canvas.native.dragMoveEvent = self.dragMoveEvent
+            self.canvas.native.dragLeaveEvent = self.dragLeaveEvent
+            self.canvas.native.dropEvent = self.dropEvent
+
+        # Slot Identifier Badge (shown in multi-view grid modes: 2-up, 4-up, 6-up)
+        self.slot_badge = QtWidgets.QLabel(f"SLOT {self.slot_index + 1}", self)
+        self.slot_badge.setStyleSheet("""
+            QLabel {
+                background-color: rgba(18, 18, 20, 200);
+                color: #60a5fa;
+                border: 1px solid #2563eb;
+                border-radius: 4px;
+                font-family: monospace;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 3px 8px;
+            }
+        """)
+        self.slot_badge.move(12, 12)
+        self.slot_badge.hide()
+
+        # Drop Target Overlay (visible when hovering drag from playlist or explorer)
+        self._drop_overlay = QtWidgets.QLabel(f"Drop to Play in Slot {self.slot_index + 1}", self)
+        self._drop_overlay.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._drop_overlay.setStyleSheet("""
+            QLabel {
+                background-color: rgba(30, 58, 138, 175);
+                color: #ffffff;
+                font-size: 15px;
+                font-weight: bold;
+                border: 2px dashed #60a5fa;
+                border-radius: 8px;
+            }
+        """)
+        self._drop_overlay.hide()
+
+    def set_slot_badge(self, visible: bool, title: str = None):
+        if hasattr(self, 'slot_badge'):
+            if title:
+                self.slot_badge.setText(title)
+            else:
+                self.slot_badge.setText(f"SLOT {self.slot_index + 1}")
+            self.slot_badge.setVisible(visible)
+            if visible:
+                self.slot_badge.adjustSize()
+                self.slot_badge.raise_()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._reposition_false_color_legend()
+        if hasattr(self, '_drop_overlay') and self._drop_overlay.isVisible():
+            self._drop_overlay.setGeometry(8, 8, max(10, self.width() - 16), max(10, self.height() - 16))
+        if hasattr(self, 'slot_badge') and self.slot_badge.isVisible():
+            self.slot_badge.move(12, 12)
+            self.slot_badge.raise_()
 
     def _reposition_false_color_legend(self):
         if hasattr(self, '_false_color_legend') and self._false_color_legend.isVisible():
@@ -537,6 +593,13 @@ class VispyViewport(QtWidgets.QWidget):
         self._show_guide_title = title
         self._update_safe_guides()
 
+    def _create_guide_line(self, pts_array: np.ndarray, color, width: float = 2.0) -> visuals.Line:
+        """Create a safe guide line with depth testing disabled so it always renders on top."""
+        vis = visuals.Line(pos=pts_array, color=color, width=width, method='gl', parent=self.view.scene)
+        vis.order = 20
+        vis.set_gl_state('translucent', depth_test=False)
+        return vis
+
     def _update_safe_guides(self):
         if hasattr(self, '_guide_visuals'):
             for vis in self._guide_visuals:
@@ -546,60 +609,69 @@ class VispyViewport(QtWidgets.QWidget):
                     pass
         self._guide_visuals = []
 
-        if not getattr(self, '_show_guides', False) or self._last_shape is None:
+        if not getattr(self, '_show_guides', False):
+            self.canvas.update()
+            return
+
+        if self._last_shape is None:
+            if hasattr(self, 'image_visual') and hasattr(self.image_visual, '_data') and self.image_visual._data is not None:
+                d = self.image_visual._data
+                if hasattr(d, 'shape') and len(d.shape) >= 2 and d.shape[0] > 1 and d.shape[1] > 1:
+                    self._last_shape = (d.shape[0], d.shape[1])
+            if self._last_shape is None and self.main_window and hasattr(self.main_window, 'core') and self.main_window.core.media:
+                sz = self.main_window.core.media.size
+                if sz and sz[0] > 0 and sz[1] > 0:
+                    self._last_shape = (sz[1], sz[0])
+
+        if self._last_shape is None:
             return
 
         h, w = self._last_shape
-        color = (0.2, 0.8, 0.2, 0.4) 
-        color_cross = (0.8, 0.2, 0.2, 0.5) 
-        width = 1.0
+        color_cross = (1.0, 0.25, 0.25, 0.95)   # Vibrant red center crosshair
+        color_thirds = (0.2, 0.75, 1.0, 0.75)   # Clean blue-cyan rule of thirds
+        color_action = (0.0, 1.0, 0.65, 0.90)   # High-visibility mint green (90% action safe)
+        color_title = (1.0, 0.85, 0.0, 0.90)    # High-visibility gold yellow (80% title safe)
 
         if getattr(self, '_show_guide_center', True):
-            cross_pts = np.array([
-                [w / 2.0, h * 0.46, 0], [w / 2.0, h * 0.54, 0],
-                [w * 0.47, h / 2.0, 0], [w * 0.53, h / 2.0, 0]
-            ], dtype=np.float32)
-            v_line = visuals.Line(pos=cross_pts[:2], color=color_cross, width=width, parent=self.view.scene)
-            h_line = visuals.Line(pos=cross_pts[2:], color=color_cross, width=width, parent=self.view.scene)
-            v_line.order = 8
-            h_line.order = 8
+            cx = float(w) / 2.0
+            cy = float(h) / 2.0
+            v_pts = np.array([[cx, float(h) * 0.44], [cx, float(h) * 0.56]], dtype=np.float32)
+            h_pts = np.array([[float(w) * 0.45, cy], [float(w) * 0.55, cy]], dtype=np.float32)
+            v_line = self._create_guide_line(v_pts, color=color_cross, width=2.0)
+            h_line = self._create_guide_line(h_pts, color=color_cross, width=2.0)
             self._guide_visuals.extend([v_line, h_line])
 
         if getattr(self, '_show_guide_thirds', True):
-            x1, x2 = w / 3.0, 2.0 * w / 3.0
-            y1, y2 = h / 3.0, 2.0 * h / 3.0
-            t1 = visuals.Line(pos=np.array([[x1, 0, 0], [x1, h, 0]], dtype=np.float32), color=color, width=width, parent=self.view.scene)
-            t2 = visuals.Line(pos=np.array([[x2, 0, 0], [x2, h, 0]], dtype=np.float32), color=color, width=width, parent=self.view.scene)
-            t3 = visuals.Line(pos=np.array([[0, y1, 0], [w, y1, 0]], dtype=np.float32), color=color, width=width, parent=self.view.scene)
-            t4 = visuals.Line(pos=np.array([[0, y2, 0], [w, y2, 0]], dtype=np.float32), color=color, width=width, parent=self.view.scene)
-            for t in (t1, t2, t3, t4):
-                t.order = 8
-                self._guide_visuals.append(t)
+            x1, x2 = float(w) / 3.0, 2.0 * float(w) / 3.0
+            y1, y2 = float(h) / 3.0, 2.0 * float(h) / 3.0
+            t1 = self._create_guide_line(np.array([[x1, 0.0], [x1, float(h)]], dtype=np.float32), color=color_thirds, width=1.5)
+            t2 = self._create_guide_line(np.array([[x2, 0.0], [x2, float(h)]], dtype=np.float32), color=color_thirds, width=1.5)
+            t3 = self._create_guide_line(np.array([[0.0, y1], [float(w), y1]], dtype=np.float32), color=color_thirds, width=1.5)
+            t4 = self._create_guide_line(np.array([[0.0, y2], [float(w), y2]], dtype=np.float32), color=color_thirds, width=1.5)
+            self._guide_visuals.extend([t1, t2, t3, t4])
 
         if getattr(self, '_show_guide_action', True):
-            ax1, ax2 = 0.05 * w, 0.95 * w
-            ay1, ay2 = 0.05 * h, 0.95 * h
-            rect = np.array([
-                [ax1, ay1, 0], [ax2, ay1, 0],
-                [ax2, ay2, 0], [ax1, ay2, 0],
-                [ax1, ay1, 0]
+            ax1, ax2 = 0.05 * float(w), 0.95 * float(w)
+            ay1, ay2 = 0.05 * float(h), 0.95 * float(h)
+            rect_act = np.array([
+                [ax1, ay1], [ax2, ay1],
+                [ax2, ay2], [ax1, ay2],
+                [ax1, ay1]
             ], dtype=np.float32)
-            act_line = visuals.Line(pos=rect, color=color, width=width, parent=self.view.scene)
-            act_line.order = 8
+            act_line = self._create_guide_line(rect_act, color=color_action, width=2.0)
             self._guide_visuals.append(act_line)
 
         if getattr(self, '_show_guide_title', True):
-            tx1, tx2 = 0.10 * w, 0.90 * w
-            ty1, ty2 = 0.10 * h, 0.90 * h
-            rect = np.array([
-                [tx1, ty1, 0], [tx2, ty1, 0],
-                [tx2, ty2, 0], [tx1, ty2, 0],
-                [tx1, ty1, 0]
+            tx1, tx2 = 0.10 * float(w), 0.90 * float(w)
+            ty1, ty2 = 0.10 * float(h), 0.90 * float(h)
+            rect_title = np.array([
+                [tx1, ty1], [tx2, ty1],
+                [tx2, ty2], [tx1, ty2],
+                [tx1, ty1]
             ], dtype=np.float32)
-            tit_line = visuals.Line(pos=rect, color=color, width=width, parent=self.view.scene)
-            tit_line.order = 8
+            tit_line = self._create_guide_line(rect_title, color=color_title, width=2.0)
             self._guide_visuals.append(tit_line)
-            
+
         self.canvas.update()
 
     # ─────────────────────────────────────────────────────────────
@@ -632,6 +704,12 @@ class VispyViewport(QtWidgets.QWidget):
         self._press_pos = None
         self._pan_last_pos = None
         self._is_panning = False
+
+        # Timeline scrubbing state (DJV style - middle mouse button)
+        self._is_scrubbing = False
+        self._scrub_start_x = 0.0
+        self._scrub_start_frame = 0
+        self._scrub_button = None
         
         self.canvas.events.mouse_press.connect(self._on_canvas_mouse_press)
         self.canvas.events.mouse_release.connect(self._on_canvas_mouse_release)
@@ -703,12 +781,25 @@ class VispyViewport(QtWidgets.QWidget):
             event.handled = True
             return
 
-        # Middle-click (button 3): start panning (always available, even while drawing)
+        # Middle-click (button 3): start timeline scrubbing (DJV style), or pan with Alt/Space
         if event.button == 3:
-            self._is_panning = True
-            self._pan_last_pos = event.pos
-            event.handled = True
-            return
+            modifiers = getattr(event, 'modifiers', ()) or ()
+            if 'Alt' in modifiers or 'Space' in modifiers:
+                self._is_panning = True
+                self._pan_last_pos = event.pos
+                event.handled = True
+                return
+            else:
+                self._is_scrubbing = True
+                self._scrub_button = 3
+                self._scrub_start_x = event.pos[0]
+                self._scrub_start_frame = getattr(self.main_window, 'current_index', 0) if self.main_window else 0
+                if self.canvas and hasattr(self.canvas, 'native') and self.canvas.native:
+                    self.canvas.native.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.SizeHorCursor))
+                if self.main_window and getattr(self.main_window, 'playing', False):
+                    self.main_window.pause()
+                event.handled = True
+                return
 
         # Alt+Click or Space+Click: pan modifier
         modifiers = getattr(event, 'modifiers', ()) or ()
@@ -754,6 +845,29 @@ class VispyViewport(QtWidgets.QWidget):
 
     def _on_mouse_move(self, event):
         try:
+            # 0. Active timeline scrubbing (Middle-click drag or Left-click drag in scrub mode)
+            if getattr(self, '_is_scrubbing', False):
+                dx = event.pos[0] - self._scrub_start_x
+                modifiers = getattr(event, 'modifiers', ()) or ()
+                if 'Shift' in modifiers:
+                    px_per_frame = 16.0  # Fine precision 1:1 scrub
+                elif 'Control' in modifiers or 'Ctrl' in modifiers:
+                    px_per_frame = 2.0   # Fast shuttle scrub
+                else:
+                    px_per_frame = 6.0   # Responsive smooth scrub
+
+                frame_delta = int(dx / px_per_frame)
+                if self.main_window and hasattr(self.main_window, 'core') and self.main_window.core:
+                    total = self.main_window.core.frame_count()
+                    if total > 0:
+                        target = max(0, min(total - 1, self._scrub_start_frame + frame_delta))
+                        if target != self.main_window.current_index:
+                            self.main_window.seek(target, update_audio=False)
+                            if hasattr(self.main_window, '_update_status'):
+                                self.main_window._update_status(f"Scrubbing: Frame {target + 1} / {total}")
+                event.handled = True
+                return
+
             # 1. Direct active panning (middle click, alt+drag, or drag past threshold)
             if getattr(self, '_is_panning', False) and getattr(self, '_pan_last_pos', None) is not None:
                 s1_x, s1_y = self._map_to_scene(self._pan_last_pos)
@@ -766,7 +880,7 @@ class VispyViewport(QtWidgets.QWidget):
                 event.handled = True
                 return
 
-            # 2. Left-drag when NOT drawing -> check if dragged past threshold to begin pan
+            # 2. Left-drag when NOT drawing -> check if dragged past threshold to begin pan or scrub
             is_button_1_down = (
                 event.button == 1
                 or (hasattr(event, 'buttons') and 1 in event.buttons)
@@ -810,6 +924,20 @@ class VispyViewport(QtWidgets.QWidget):
             import traceback; traceback.print_exc()
 
     def _on_canvas_mouse_release(self, event):
+        if getattr(self, '_is_scrubbing', False):
+            self._is_scrubbing = False
+            self._scrub_button = None
+            self._press_pos = None
+            if self.canvas and hasattr(self.canvas, 'native') and self.canvas.native:
+                self.canvas.native.unsetCursor()
+            if self.main_window:
+                if hasattr(self.main_window, '_on_scrub_finished'):
+                    self.main_window._on_scrub_finished()
+                if hasattr(self.main_window, '_update_status') and hasattr(self.main_window, '_status_base'):
+                    self.main_window._update_status(self.main_window._status_base)
+            event.handled = True
+            return
+
         if getattr(self, '_is_panning', False):
             self._is_panning = False
             self._pan_last_pos = None
@@ -1268,6 +1396,9 @@ class VispyViewport(QtWidgets.QWidget):
                 self.image_visual._grading_fn['wipe_enabled'] = 0
                 self.image_visual.set_data(frame)
 
+            if getattr(self, '_show_guides', False) and not getattr(self, '_guide_visuals', None):
+                self._update_safe_guides()
+
         self.canvas.update()
 
     # ─────────────────────────────────────────────────────────────
@@ -1343,12 +1474,55 @@ class VispyViewport(QtWidgets.QWidget):
     # Drag-and-drop
     # ─────────────────────────────────────────────────────────────
 
+    def _set_drop_highlight(self, active: bool):
+        if hasattr(self, '_drop_overlay'):
+            if active:
+                self._drop_overlay.setGeometry(8, 8, max(10, self.width() - 16), max(10, self.height() - 16))
+                self._drop_overlay.show()
+                self._drop_overlay.raise_()
+            else:
+                self._drop_overlay.hide()
+
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
+        mime = event.mimeData()
+        if mime.hasFormat('application/x-vfxplayer-shot') or mime.hasUrls() or mime.hasText():
             event.acceptProposedAction()
+            self._set_drop_highlight(True)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        mime = event.mimeData()
+        if mime.hasFormat('application/x-vfxplayer-shot') or mime.hasUrls() or mime.hasText():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self._set_drop_highlight(False)
+        event.accept()
 
     def dropEvent(self, event):
-        paths = [u.toLocalFile() for u in event.mimeData().urls()]
+        self._set_drop_highlight(False)
+        mime = event.mimeData()
+
+        # 1. Custom playlist shot dropped
+        if mime.hasFormat('application/x-vfxplayer-shot'):
+            try:
+                raw = mime.data('application/x-vfxplayer-shot').data().decode('utf-8')
+                import json
+                shot_data = json.loads(raw)
+                if self.main_window and hasattr(self.main_window, 'handle_shot_dropped_on_slot'):
+                    self.main_window.handle_shot_dropped_on_slot(self.slot_index, shot_data)
+                elif shot_data.get('media_path') and self.main_window:
+                    self.main_window.load_media_into_slot(self.slot_index, shot_data['media_path'])
+                event.acceptProposedAction()
+                return
+            except Exception as e:
+                print(f"[Drop Error] Failed to parse shot payload: {e}")
+
+        # 2. File URLs dropped (external file explorer or playlist URLs)
+        paths = [u.toLocalFile() for u in mime.urls() if u.toLocalFile()]
         if paths and self.main_window:
             target = paths[0]
             if hasattr(self.main_window, 'load_media_into_slot'):
@@ -1357,3 +1531,13 @@ class VispyViewport(QtWidgets.QWidget):
                 self.main_window.load_compare_media(target)
             else:
                 self.main_window.load_media(target)
+            event.acceptProposedAction()
+            return
+
+        # 3. Plain text path fallback
+        if mime.hasText():
+            text_p = mime.text().strip()
+            if os.path.exists(text_p) and self.main_window:
+                self.main_window.load_media_into_slot(self.slot_index, text_p)
+                event.acceptProposedAction()
+                return
