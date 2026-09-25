@@ -171,8 +171,8 @@ build_exe_options = {
 base = "Win32GUI" if sys.platform == "win32" else None
 
 setup(
-    name="VFX Review Player",
-    version="1.0",
+    name="vfx-player",
+    version="1.1.3",
     description="VFX Review Player",
     options={"build_exe": build_exe_options},
     executables=[

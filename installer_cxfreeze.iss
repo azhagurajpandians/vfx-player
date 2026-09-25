@@ -7,7 +7,7 @@
 #ifndef MyAppVersion
 #define MyAppVersion "1.1.3"
 #endif
-#define MyAppPublisher "VFX Tools"
+#define MyAppPublisher "vfx-player"
 #define MyAppExeName "VFX Review Player.exe"
 
 [Setup]
