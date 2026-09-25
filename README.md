@@ -31,6 +31,20 @@ Synchronize up to 6 shots simultaneously with master transport control, independ
 
 ---
 
+### Interactive Wipe & Split Comparison
+Frame-locked A/B review featuring a real-time draggable split-wipe line, dedicated wipe slider control, and seamless version-to-version inspection between comp revisions and live-action plates.
+
+![Interactive Wipe Comparison](docs/screenshots/wipe_comparison.png)
+
+---
+
+### Vector Annotations & Supervisor Markup
+Production drawing tools featuring vector pens, directional arrows, callout ellipses, bounding boxes, text overlays, stroke width controls, and customizable color swatches. Annotations persist across timeline frames and auto-save to `.review.json` sidecars.
+
+![Vector Annotations & Review](docs/screenshots/viewport_annotations.png)
+
+---
+
 ### Interactive 3-Way ASC CDL Color Grading
 Interactive Lift (Offset) and Gamma (Power) color balance wheels, Slope (Gain), and Saturation sliders accelerated by a zero-latency GPU GLSL shader pipeline. Supports import and export of industry-standard `.cdl` / `.cc` XML files.
 
