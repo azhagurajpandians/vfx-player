@@ -69,7 +69,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          python -m unittest discover -s tests
+          xvfb-run -a python -m unittest discover -s tests
 
       - name: Make Scripts Executable
         run: |
