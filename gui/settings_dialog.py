@@ -1,4 +1,5 @@
 
+import os
 from PyQt6 import QtWidgets, QtCore
 from core.player_core import PlaybackStrategy
 
@@ -204,6 +205,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.prefs['show_cached_timeline'] = self.show_cached_chk.isChecked()
         # Map back to string value
         strat_opts = ['performance', 'progressive', 'stream', 'readbehind']
+        self.prefs['playback_strategy'] = strat_opts[self.strategy_combo.currentIndex()]
         cfg_val = self.ocio_path_edit.text().strip()
         if cfg_val and os.path.isabs(cfg_val):
             here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

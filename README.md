@@ -13,7 +13,7 @@
   <a href="https://github.com/azhagurajpandians/vfx-player/releases/latest"><img src="https://img.shields.io/badge/release-v1.1.4-blue.svg?style=flat-square" alt="Release v1.1.4"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-green.svg?style=flat-square" alt="License: GPLv3"></a>
   <img src="https://img.shields.io/badge/python-3.10%20%7C%203.11-blue.svg?style=flat-square" alt="Python 3.10 | 3.11">
-  <img src="https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg?style=flat-square" alt="Platform Windows x64">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20x64-lightgrey.svg?style=flat-square" alt="Platform Windows | Linux x64">
   <img src="https://img.shields.io/badge/color-OpenColorIO%20v2-orange.svg?style=flat-square" alt="OpenColorIO v2">
   <img src="https://img.shields.io/badge/graphics-OpenGL%203.3%2B-red.svg?style=flat-square" alt="OpenGL 3.3+">
 </p>
@@ -201,17 +201,32 @@ python main.py
 
 ### Packaging & Installer Compilation
 
-#### Build Standalone Distribution (cx_Freeze)
+#### Windows Standalone Distribution & Installer
 ```powershell
+# 1. Build cx_Freeze distribution
 .\build_cxfreeze.bat
-```
-Generates a zero-dependency distribution in `build/exe.win-amd64-3.11/`.
 
-#### Build Windows Installer (Inno Setup)
-```powershell
+# 2. Build Inno Setup standalone installer
 .\build_installer.bat
 ```
 Automatically compiles `dist_installer/VFX_Review_Player_Setup_v1.1.4.exe`.
+
+#### Linux Standalone Distribution & AppImage
+```bash
+# Option 1: Native build on Linux
+chmod +x build_linux.sh build_appimage.sh
+./build_linux.sh
+./build_appimage.sh
+
+# Option 2: Build using Docker from Windows or Linux
+build_docker.bat   # on Windows
+# or
+./build_docker.sh  # on Linux
+
+# Option 3: Automated cloud build via GitHub Actions
+# See .github/workflows/build_linux.yml
+```
+For detailed distribution guides, dependencies, and desktop integration instructions, see the [Linux Build Guide](docs/LINUX_BUILD_GUIDE.md).
 
 ---
 

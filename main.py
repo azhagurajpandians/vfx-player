@@ -2,7 +2,8 @@ import os
 import sys
 
 # Disable PyOpenGL C-acceleration (OpenGL_accelerate) to prevent Cython __reduce_cython__ KeyError in frozen builds
-os.environ["PYOPENGL_PLATFORM"] = "win32"
+if sys.platform == "win32":
+    os.environ["PYOPENGL_PLATFORM"] = "win32"
 try:
     import OpenGL
     OpenGL.USE_ACCELERATE = False

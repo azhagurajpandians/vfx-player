@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=VFX Review Player
+Comment=Professional VFX Review, Playback, Color Grading & Media Delivery Platform
+Exec=vfx-player %F
+Icon=vfx-player
+Terminal=false
+Categories=AudioVideo;Video;Player;Graphics;2DGraphics;
+MimeType=image/x-exr;image/x-dpx;image/tiff;image/png;image/jpeg;video/mp4;video/quicktime;video/x-matroska;video/x-msvideo;
+StartupNotify=true
+StartupWMClass=VFX Review Player

@@ -18,6 +18,7 @@ Library/
 *.log
 *.txt
 !requirements.txt
+!requirements-linux.txt
 !README.md
 !README-pyinstaller.md
 tmp_*.py
@@ -29,6 +30,7 @@ micromamba*
 test_*.png
 dist_installer/
 !vfx_review_player.spec
+!vfx_player_linux.spec
 scratch/
 *.egg-info/
 contact_sheet*
