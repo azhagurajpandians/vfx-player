@@ -36,37 +36,37 @@ class TestExportPipeline(unittest.TestCase):
         print("setUpClass: creating test_dir...")
         os.makedirs(cls.test_dir, exist_ok=True)
         
-        print("setUpClass: importing OpenImageIO...")
-        import OpenImageIO as oiio
-        print("setUpClass: OpenImageIO imported successfully!")
-        
-        cls.exr_path = os.path.join(cls.test_dir, 'export_test.0001.exr')
-        
         try:
-            td = oiio.BASETYPE.FLOAT
-        except AttributeError:
-            td = oiio.FLOAT
+            import OpenImageIO as oiio
+        except ImportError:
+            oiio = None
+
+        cls.exr_path = os.path.join(cls.test_dir, 'export_test.0001.exr')
+        pixels = np.zeros((60, 80, 3), dtype=np.float32)
+
+        if oiio is not None:
+            try:
+                td = oiio.BASETYPE.FLOAT
+            except AttributeError:
+                td = oiio.FLOAT
+                
+            spec = oiio.ImageSpec(80, 60, 3, td)
+            spec.attribute("compression", "piz")
+            spec.attribute("camera", "Red V-Raptor")
+            spec.attribute("lens", "50mm anamorphic")
             
-        print("setUpClass: creating ImageSpec...")
-        spec = oiio.ImageSpec(80, 60, 3, td)
-        spec.attribute("compression", "piz")
-        spec.attribute("camera", "Red V-Raptor")
-        spec.attribute("lens", "50mm anamorphic")
-        
-        print("setUpClass: creating ImageOutput...")
-        out = oiio.ImageOutput.create(cls.exr_path)
-        print(f"setUpClass: ImageOutput created: {out}")
-        if out:
-            print("setUpClass: opening ImageOutput...")
-            out.open(cls.exr_path, spec)
-            print("setUpClass: writing image pixels...")
-            pixels = np.zeros((60, 80, 3), dtype=np.float32)
-            out.write_image(pixels)
-            print("setUpClass: closing ImageOutput...")
-            out.close()
-            cls.exr_created = True
+            out = oiio.ImageOutput.create(cls.exr_path)
+            if out:
+                out.open(cls.exr_path, spec)
+                out.write_image(pixels)
+                out.close()
+                cls.exr_created = True
+            else:
+                cv2.imwrite(cls.exr_path, pixels)
+                cls.exr_created = True
         else:
-            cls.exr_created = False
+            cv2.imwrite(cls.exr_path, pixels)
+            cls.exr_created = True
         print("setUpClass: completed successfully!")
 
     @classmethod

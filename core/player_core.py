@@ -304,6 +304,9 @@ def is_network_path(path: str) -> bool:
     """Detect if a path is on a network share (UNC path or mapped network drive)."""
     if not path:
         return False
+    norm = str(path).replace('\\', '/')
+    if norm.startswith('//') or path.startswith('\\\\') or path.startswith('//'):
+        return True
     p = os.path.abspath(path)
     if p.startswith('\\\\') or p.startswith('//'):
         return True
