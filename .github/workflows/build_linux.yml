@@ -53,6 +53,9 @@ jobs:
             libxkbcommon-x11-0 \
             libdbus-1-3 \
             libfuse2 \
+            libopenexr-dev \
+            libimath-dev \
+            xvfb \
             wget \
             curl \
             file
@@ -63,6 +66,8 @@ jobs:
           pip install -r requirements-linux.txt
 
       - name: Run Test Suite
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
           python -m unittest discover -s tests
 

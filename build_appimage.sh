@@ -77,7 +77,8 @@ fi
 # 5. Build AppImage
 OUTPUT_APPIMAGE="${DIST_DIR}/VFX_Review_Player-v${VERSION}-x86_64.AppImage"
 echo "[INFO] Generating AppImage package..."
-ARCH=x86_64 "$TOOL" --no-appstream "$APP_DIR" "$OUTPUT_APPIMAGE"
+export APPIMAGE_EXTRACT_AND_RUN=1
+ARCH=x86_64 "$TOOL" --appimage-extract-and-run --no-appstream "$APP_DIR" "$OUTPUT_APPIMAGE"
 
 echo "========================================================"
 echo "              AppImage Build Successful!                "
