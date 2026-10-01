@@ -8,10 +8,15 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-linux:
     name: Build Linux AppImage & Tarball
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout code
