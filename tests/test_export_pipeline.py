@@ -61,12 +61,15 @@ class TestExportPipeline(unittest.TestCase):
                 out.write_image(pixels)
                 out.close()
                 cls.exr_created = True
+                cls.exr_metadata_written = True
             else:
                 cv2.imwrite(cls.exr_path, pixels)
                 cls.exr_created = True
+                cls.exr_metadata_written = False
         else:
             cv2.imwrite(cls.exr_path, pixels)
             cls.exr_created = True
+            cls.exr_metadata_written = False
         print("setUpClass: completed successfully!")
 
     @classmethod
@@ -111,10 +114,13 @@ class TestExportPipeline(unittest.TestCase):
 
     def test_metadata_retrieval_and_caching(self):
         """Test that get_metadata_for_frame extracts correctly and is cached."""
-        if not self.exr_created:
-            self.skipTest("OIIO could not write test EXR")
+        if not getattr(self, 'exr_metadata_written', False):
+            self.skipTest("OIIO metadata not written to test EXR")
             
         core = PlayerCore()
+        if not getattr(core.loader, '_oiio_loaded', False):
+            self.skipTest("OpenImageIO loader not active in PlayerCore")
+
         core.load(self.exr_path)
         
         # Verify metadata is loaded

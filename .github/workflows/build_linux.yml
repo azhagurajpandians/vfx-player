@@ -61,19 +61,22 @@ jobs:
           python -c "
           import sys, os, glob
           site_pkg = [p for p in sys.path if 'site-packages' in p][-1]
-          for item in glob.glob('/usr/lib/python3/dist-packages/*OpenImageIO*'):
-              dst = os.path.join(site_pkg, os.path.basename(item))
-              if not os.path.exists(dst):
-                  try:
-                      os.symlink(item, dst)
-                      print(f'Linked {item} -> {dst}')
-                  except Exception as e:
-                      pass
+          patterns = ['/usr/lib/python3/dist-packages/*OpenImageIO*', '/usr/lib/x86_64-linux-gnu/python3/dist-packages/*OpenImageIO*']
+          for p in patterns:
+              for item in glob.glob(p):
+                  dst = os.path.join(site_pkg, os.path.basename(item))
+                  if not os.path.exists(dst):
+                      try:
+                          os.symlink(item, dst)
+                          print(f'Linked {item} -> {dst}')
+                      except Exception as e:
+                          pass
           " || true
 
       - name: Run Test Suite
         env:
           QT_QPA_PLATFORM: offscreen
+          PYTHONPATH: "/usr/lib/x86_64-linux-gnu/python3/dist-packages:/usr/lib/python3/dist-packages"
         run: |
           xvfb-run -a python -m unittest discover -s tests
 
