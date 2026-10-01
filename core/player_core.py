@@ -924,10 +924,14 @@ class PlayerCore:
                     # Extract extra metadata
                     for i in range(len(spec.extra_attribs)):
                         attr = spec.extra_attribs[i]
-                        if attr.type.basetype == oiio.BASETYPE.STRING:
-                             self.media.metadata[attr.name] = spec.get_string_attribute(attr.name)
-                        elif attr.type.basetype in (oiio.BASETYPE.INT, oiio.BASETYPE.FLOAT):
-                             self.media.metadata[attr.name] = spec.get_float_attribute(attr.name)
+                        val = getattr(attr, 'value', None)
+                        if val is None:
+                            try:
+                                val = spec.get_string_attribute(attr.name)
+                            except Exception:
+                                pass
+                        if val is not None:
+                            self.media.metadata[attr.name] = val
                              
                     inp.close()
                     return
@@ -1059,10 +1063,14 @@ class PlayerCore:
                 spec = inp.spec()
                 for i in range(len(spec.extra_attribs)):
                     attr = spec.extra_attribs[i]
-                    if attr.type.basetype == oiio.BASETYPE.STRING:
-                         meta[attr.name] = spec.get_string_attribute(attr.name)
-                    elif attr.type.basetype in (oiio.BASETYPE.INT, oiio.BASETYPE.FLOAT):
-                         meta[attr.name] = spec.get_float_attribute(attr.name)
+                    val = getattr(attr, 'value', None)
+                    if val is None:
+                        try:
+                            val = spec.get_string_attribute(attr.name)
+                        except Exception:
+                            pass
+                    if val is not None:
+                        meta[attr.name] = val
                 inp.close()
         except Exception:
             pass
