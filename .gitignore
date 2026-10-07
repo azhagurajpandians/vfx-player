@@ -19,6 +19,7 @@ Library/
 *.txt
 !requirements.txt
 !requirements-linux.txt
+!requirements-mac.txt
 !README.md
 !README-pyinstaller.md
 tmp_*.py
@@ -31,6 +32,7 @@ test_*.png
 dist_installer/
 !vfx_review_player.spec
 !vfx_player_linux.spec
+!vfx_player_mac.spec
 scratch/
 *.egg-info/
 contact_sheet*

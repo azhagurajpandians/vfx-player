@@ -25,6 +25,8 @@ if os.path.exists("logo.ico"):
     include_files.append(("logo.ico", "logo.ico"))
 if os.path.exists("logo.png"):
     include_files.append(("logo.png", "logo.png"))
+if os.path.exists("logo.icns"):
+    include_files.append(("logo.icns", "logo.icns"))
 if os.path.exists("bin/ffmpeg"):
     include_files.append(("bin/ffmpeg", "bin/ffmpeg"))
 
@@ -178,7 +180,12 @@ if sys.platform == "win32":
 
 base = "Win32GUI" if sys.platform == "win32" else None
 target_name = "VFX Review Player.exe" if sys.platform == "win32" else "vfx-player"
-app_icon = "logo.ico" if sys.platform == "win32" else "logo.png"
+if sys.platform == "win32":
+    app_icon = "logo.ico"
+elif sys.platform == "darwin" and os.path.exists("logo.icns"):
+    app_icon = "logo.icns"
+else:
+    app_icon = "logo.png"
 
 # Read version from VERSION file if available
 version = "1.1.4"

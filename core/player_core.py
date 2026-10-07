@@ -149,6 +149,8 @@ def _find_ffmpeg():
 
     # Check bundled locations (order: most specific first)
     search_dirs = [
+        os.path.join(app_dir, 'bin', 'ffmpeg', 'mac'),
+        os.path.join(app_dir, 'bin', 'ffmpeg', 'darwin'),
         os.path.join(app_dir, 'bin', 'ffmpeg', 'linux', 'bin'),
         os.path.join(app_dir, 'bin', 'ffmpeg', 'linux'),
         os.path.join(app_dir, 'bin', 'ffmpeg', 'windows', 'bin'),
@@ -156,17 +158,24 @@ def _find_ffmpeg():
         os.path.join(app_dir, 'bin', 'ffmpeg'),
         os.path.join(app_dir, 'bin'),
         os.path.join(app_dir, 'ffmpeg'),
+        os.path.join(app_dir, '.knacktools', 'bin', 'ffmpeg', 'mac'),
+        os.path.join(app_dir, '.knacktools', 'bin', 'ffmpeg', 'darwin'),
         os.path.join(app_dir, '.knacktools', 'bin', 'ffmpeg', 'linux', 'bin'),
         os.path.join(app_dir, '.knacktools', 'bin', 'ffmpeg', 'windows', 'bin'),
         os.path.join(app_dir, '.knacktools', 'ffmpeg', 'bin'),
+        os.path.join(app_dir, '.knacktools', 'ffmpeg'),
         os.path.join(app_dir, '.knacktools', 'bin'),
         app_dir,
+        '/opt/homebrew/bin',
+        '/usr/local/bin',
     ]
 
     # .knacktools locations (production machines)
     home = os.path.expanduser('~')
-    roots = [home, 'C:\\', 'D:\\', 'E:\\'] if sys.platform == 'win32' else [home, '/opt', '/usr/local', '/usr']
+    roots = [home, 'C:\\', 'D:\\', 'E:\\'] if sys.platform == 'win32' else [home, '/opt', '/opt/homebrew', '/usr/local', '/usr']
     for root in roots:
+        search_dirs.append(os.path.join(root, '.knacktools', 'bin', 'ffmpeg', 'mac'))
+        search_dirs.append(os.path.join(root, '.knacktools', 'bin', 'ffmpeg', 'darwin'))
         search_dirs.append(os.path.join(root, '.knacktools', 'bin', 'ffmpeg', 'linux', 'bin'))
         search_dirs.append(os.path.join(root, '.knacktools', 'bin', 'ffmpeg', 'windows', 'bin'))
         search_dirs.append(os.path.join(root, '.knacktools', 'ffmpeg', 'bin'))
@@ -195,6 +204,8 @@ def _find_ffprobe():
         app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     search_dirs = [
+        os.path.join(app_dir, 'bin', 'ffmpeg', 'mac'),
+        os.path.join(app_dir, 'bin', 'ffmpeg', 'darwin'),
         os.path.join(app_dir, 'bin', 'ffmpeg', 'linux', 'bin'),
         os.path.join(app_dir, 'bin', 'ffmpeg', 'linux'),
         os.path.join(app_dir, 'bin', 'ffmpeg', 'windows', 'bin'),
@@ -202,17 +213,23 @@ def _find_ffprobe():
         os.path.join(app_dir, 'bin', 'ffmpeg'),
         os.path.join(app_dir, 'bin'),
         os.path.join(app_dir, 'ffmpeg'),
+        os.path.join(app_dir, '.knacktools', 'bin', 'ffmpeg', 'mac'),
+        os.path.join(app_dir, '.knacktools', 'bin', 'ffmpeg', 'darwin'),
         os.path.join(app_dir, '.knacktools', 'bin', 'ffmpeg', 'linux', 'bin'),
         os.path.join(app_dir, '.knacktools', 'bin', 'ffmpeg', 'windows', 'bin'),
         os.path.join(app_dir, '.knacktools', 'ffmpeg', 'bin'),
         os.path.join(app_dir, '.knacktools', 'bin'),
         app_dir,
+        '/opt/homebrew/bin',
+        '/usr/local/bin',
     ]
 
     # .knacktools locations (production machines)
     home = os.path.expanduser('~')
-    roots = [home, 'C:\\', 'D:\\', 'E:\\'] if sys.platform == 'win32' else [home, '/opt', '/usr/local', '/usr']
+    roots = [home, 'C:\\', 'D:\\', 'E:\\'] if sys.platform == 'win32' else [home, '/opt', '/opt/homebrew', '/usr/local', '/usr']
     for root in roots:
+        search_dirs.append(os.path.join(root, '.knacktools', 'bin', 'ffmpeg', 'mac'))
+        search_dirs.append(os.path.join(root, '.knacktools', 'bin', 'ffmpeg', 'darwin'))
         search_dirs.append(os.path.join(root, '.knacktools', 'bin', 'ffmpeg', 'linux', 'bin'))
         search_dirs.append(os.path.join(root, '.knacktools', 'bin', 'ffmpeg', 'windows', 'bin'))
         search_dirs.append(os.path.join(root, '.knacktools', 'ffmpeg', 'bin'))

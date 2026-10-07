@@ -1597,6 +1597,9 @@ class MainWindow(QtWidgets.QMainWindow):
     # Legacy UI construction methods removed
 
     def _build_menu(self):
+        # Ensure consistent in-window menu bar with top-right corner widgets on macOS
+        self.menuBar().setNativeMenuBar(False)
+
         # Style Menu Bar and Dropdown Menus
         self.menuBar().setStyleSheet("""
             QMenuBar {

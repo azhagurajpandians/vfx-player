@@ -228,6 +228,23 @@ build_docker.bat   # on Windows
 ```
 For detailed distribution guides, dependencies, and desktop integration instructions, see the [Linux Build Guide](docs/LINUX_BUILD_GUIDE.md).
 
+#### macOS Application Bundle (.app) & DMG Installer
+```bash
+# 1. Install system prerequisites via Homebrew
+brew install ffmpeg
+
+# 2. Install Python dependencies
+pip install -r requirements-mac.txt
+
+# 3. Build standalone .app bundle, .dmg installer, and .zip package
+chmod +x build_macos.sh
+./build_macos.sh
+
+# Option 2: Automated cloud build via GitHub Actions
+# See .github/workflows/build_macos.yml (builds for both Apple Silicon arm64 & Intel x86_64)
+```
+Generates drag-and-drop installer `dist_macos/VFX_Player-v1.1.4-mac-<arch>.dmg` and standalone `.app` bundle.
+
 ---
 
 ## 6. Automated Testing
