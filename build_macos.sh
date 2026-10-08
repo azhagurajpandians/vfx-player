@@ -49,7 +49,7 @@ mkdir -p dist_macos
 
 # Build macOS .app bundle via PyInstaller
 echo "[INFO] Building macOS Application Bundle with PyInstaller..."
-pyinstaller vfx_player_mac.spec --clean --noconfirm
+python3 -m PyInstaller vfx_player_mac.spec --clean --noconfirm
 
 APP_PATH="dist/VFX Player.app"
 if [ ! -d "$APP_PATH" ]; then

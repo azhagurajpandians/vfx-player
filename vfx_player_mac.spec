@@ -104,7 +104,7 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
-icon_path = "logo.icns" if os.path.exists("logo.icns") else "logo.png"
+icon_path = "logo.icns" if os.path.exists("logo.icns") else None
 
 exe = EXE(
     pyz,
