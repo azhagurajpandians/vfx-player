@@ -41,9 +41,12 @@ VFX Review Player v1.1.4 is a major release advancing the platform into a studio
 - **Native Video Decoding**: Hardware-accelerated decoding of Apple ProRes (422, 422 HQ, 4444, 4444 XQ), Avid DNxHR, H.264, and HEVC.
 - **Deep EXR Support**: Multi-channel and multi-part EXR inspection via OpenImageIO.
 
-#### 6. Packaging & Legal Compliance
-- **Clean GNU GPLv3 License**: Cleaned license documentation conforming to standard FSF terms and conditions.
+#### 6. Packaging & Multi-Platform Distribution
 - **Windows Installer**: Self-contained per-user installer (`dist_installer/VFX_Review_Player_Setup_v1.1.4.exe`) with Explorer context menu ("Open with VFX Review Player") and file associations (`.exr`, `.dpx`, `.cin`, `.mov`, `.mp4`).
+- **macOS Apple Silicon (.dmg / .zip)**: Native macOS Application Bundle (`VFX Player.app`) packaged as a drag-and-drop `.dmg` installer (`VFX_Player-v1.1.4-mac-arm64.dmg`) and portable `.zip`. Features Retina High-DPI display rendering, in-window menu bar styling, and ad-hoc code signing.
+  - *Gatekeeper Tip*: For macOS security alerts on first run, right-click `VFX Player.app` in `/Applications` and select **Open**, or run `xattr -cr /Applications/"VFX Player.app"` in Terminal.
+- **Linux AppImage**: Standalone portable AppImage (`VFX_Review_Player-v1.1.4-x86_64.AppImage`) for Ubuntu, Debian, CentOS/Rocky Linux, and standard VFX studio workstations.
+- **Clean GNU GPLv3 License**: Cleaned license documentation conforming to standard FSF terms and conditions.
 
 ---
 

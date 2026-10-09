@@ -174,6 +174,27 @@ The quickest way to install VFX Review Player on Windows 10/11 is using the self
    - File associations for VFX formats (`.exr`, `.dpx`, `.cin`, `.mov`, `.mp4`)
    - Desktop and Start Menu shortcuts
 
+### macOS Installation (DMG)
+1. Download **[VFX_Player-v1.1.4-mac-arm64.dmg](https://github.com/azhagurajpandians/vfx-player/releases/download/v1.1.4/VFX_Player-v1.1.4-mac-arm64.dmg)** from the [Latest Release](https://github.com/azhagurajpandians/vfx-player/releases/latest) page.
+2. Open the downloaded `.dmg` and drag **VFX Player.app** into your `/Applications` folder.
+
+> [!TIP]
+> **macOS Gatekeeper / Unidentified Developer Tip:**  
+> Because VFX Player is an open-source project without a paid Apple Developer certificate, macOS Gatekeeper may display a security alert on first launch (*"cannot be opened because Apple cannot check it for malicious software"* or *"is damaged and cannot be opened"*):
+> - **GUI Method:** Right-click (or Control-click) `VFX Player.app` in `/Applications`, choose **Open**, and click **Open** in the prompt.
+> - **Terminal Method:** Remove the macOS quarantine flag by running:
+>   ```bash
+>   xattr -cr /Applications/"VFX Player.app"
+>   ```
+
+### Linux Standalone (AppImage)
+1. Download **[VFX_Review_Player-v1.1.4-x86_64.AppImage](https://github.com/azhagurajpandians/vfx-player/releases/download/v1.1.4/VFX_Review_Player-v1.1.4-x86_64.AppImage)** from the [Latest Release](https://github.com/azhagurajpandians/vfx-player/releases/latest) page.
+2. Make it executable and run:
+   ```bash
+   chmod +x VFX_Review_Player-v1.1.4-x86_64.AppImage
+   ./VFX_Review_Player-v1.1.4-x86_64.AppImage
+   ```
+
 ### Running from Source
 
 #### Prerequisites
@@ -241,9 +262,9 @@ chmod +x build_macos.sh
 ./build_macos.sh
 
 # Option 2: Automated cloud build via GitHub Actions
-# See .github/workflows/build_macos.yml (builds for both Apple Silicon arm64 & Intel x86_64)
+# See .github/workflows/build_macos.yml (builds native Apple Silicon arm64 macOS packages)
 ```
-Generates drag-and-drop installer `dist_macos/VFX_Player-v1.1.4-mac-<arch>.dmg` and standalone `.app` bundle.
+Generates drag-and-drop installer `dist_macos/VFX_Player-v1.1.4-mac-arm64.dmg` and standalone `.app` bundle.
 
 ---
 
