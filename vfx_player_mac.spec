@@ -111,7 +111,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="vfx-player",
+    name="VFX Player",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -132,7 +132,7 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="vfx-player",
+    name="VFX Player",
 )
 
 app = BUNDLE(
@@ -143,12 +143,14 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "VFX Player",
         "CFBundleDisplayName": "VFX Player",
+        "CFBundleExecutable": "VFX Player",
         "CFBundleIdentifier": "com.knacktools.vfxplayer",
         "CFBundleVersion": version,
         "CFBundleShortVersionString": version,
         "NSHighResolutionCapable": True,
         "NSRequiresAquaSystemAppearance": False,
-        "LSMinimumSystemVersion": "11.0",
+        "LSMinimumSystemVersion": "10.15",
+        "NSPrincipalClass": "NSApplication",
         "CFBundlePackageType": "APPL",
         "CFBundleSignature": "????",
         "NSHumanReadableCopyright": "Copyright © 2026 Knack VFX. All rights reserved.",

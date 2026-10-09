@@ -12,7 +12,10 @@ if [ -f "VERSION" ]; then
     VERSION="$(tr -d '[:space:]' < VERSION)"
 fi
 
-ARCH="$(uname -m)"
+ARCH="$(python3 -c 'import platform; print(platform.machine())' 2>/dev/null || uname -m)"
+if [ -z "$ARCH" ]; then
+    ARCH="$(uname -m)"
+fi
 
 echo "========================================================"
 echo "        VFX Review Player - macOS Distribution Build    "
@@ -55,6 +58,14 @@ APP_PATH="dist/VFX Player.app"
 if [ ! -d "$APP_PATH" ]; then
     echo "[ERROR] Application bundle not found at $APP_PATH! Build failed."
     exit 1
+fi
+
+# Ensure executable permissions inside Contents/MacOS
+if [ -d "$APP_PATH/Contents/MacOS" ]; then
+    chmod +x "$APP_PATH/Contents/MacOS/"*
+    if [ -f "$APP_PATH/Contents/MacOS/VFX Player" ] && [ ! -f "$APP_PATH/Contents/MacOS/vfx-player" ]; then
+        ln -sf "VFX Player" "$APP_PATH/Contents/MacOS/vfx-player"
+    fi
 fi
 
 # Ad-hoc sign the application bundle (essential for Apple Silicon arm64 execution)
