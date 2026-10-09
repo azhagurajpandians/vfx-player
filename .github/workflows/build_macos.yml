@@ -26,9 +26,6 @@ jobs:
           - os: macos-14
             arch_name: arm64
             python_arch: arm64
-          - os: macos-14
-            arch_name: x86_64
-            python_arch: x64
 
     steps:
       - name: Checkout code
